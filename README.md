@@ -134,9 +134,15 @@ rise over run, and its angle is `arctan(3/2)` in **turns**, which wrap at 1 rath
 ## Interpolation that knows what it is
 
 `Ease` shapes a float; `Interp<T>` blends a type. Both pure, so anything built from them is
-predictable by construction. Rotation ships correct — `Interp.SLERP` for quaternions, `Interp.ANGLE`
-for shortest-arc wrap — instead of leaving you to discover that a lerp on angles goes the long way
-round.
+predictable by construction, and every ease lands on **exactly** 0 and 1 rather than a thousandth
+short — an animation that stops at 0.999 of its target leaves a shadow that never quite settles.
+
+Rotation ships correct, and generalized: `Hyper` is the **Cayley–Dickson tower** — real, complex,
+quaternion, octonion — with one recursive product, so `Hyper.SLERP` is dimension-generic and quaternion
+slerp is simply its level-2 case. Angles are `Turn`s, measured in **turns rather than radians**, because
+a turn wraps at 1: reducing a phase is taking a fractional part, so a thousand accumulated eighth-turns
+land on exactly zero where radians would drift. `Turn.SHORTEST` goes the short way round the wrap
+instead of leaving you to discover that a lerp on angles takes the long way.
 
 And the distinction that has teeth: a **closed-form** motion (`value = f(t)` — a tween, an analytic
 spring toward a fixed target) is fully predictable and precomputed in one shot. An **integrated** one
@@ -216,7 +222,7 @@ Dependencies point **down** and only down: vexelray-gui depends on Kronometer, n
 | Module | What it provides |
 |---|---|
 | `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Metro`, `Clock`, `Settlement`, `Overrun`, `Rate`, `Step`, `Sampled`, `Trace`. Nested time: `Tempo`, `Ratio`. Graph and horizons: `Signal`, `Cell`, `Curve`, `Effect`. Precompute pool in M5. The `Interp` interface. Pure Java, no dependencies. |
-| `kronometer-anim` | The libraries: `Ease` curves, `Interp` implementations, `Tween`, `Timeline`, `Animator`, closed-form and integrated smoothers. |
+| `kronometer-anim` | The libraries: `Ease` curves, `Turn` (shortest-arc angles in turns), `Hyper` (the Cayley–Dickson tower, with dimension-generic slerp), `Tween`, `Motion`, `Animator`, and both smoother families. Depends only on core. |
 | `kronometer-atchung` | Await an Atchung `Topic` as a yield point, or let one drive a `Cell`; publish on the timeline; carry elektro-Q messages onto it. |
 | `kronometer-demo` | The showcase — headless, so it stays free of a GUI dependency. |
 

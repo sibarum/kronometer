@@ -150,6 +150,11 @@ public final class Cell<T> implements Signal<T> {
         return this;
     }
 
+    /** Whether this cell has been declared volatile by {@link #live()}. */
+    public boolean isLive() {
+        return mode == Mode.LIVE;
+    }
+
     /** Whether this cell's future is currently determined by a curve that has not yet ended. */
     public boolean isDriven() {
         return mode == Mode.DRIVEN && curveEnd.isAfter(kron.now());

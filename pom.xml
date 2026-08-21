@@ -17,6 +17,7 @@
 
     <modules>
         <module>kronometer-core</module>
+        <module>kronometer-anim</module>
         <module>kronometer-bench</module>
     </modules>
 
@@ -35,6 +36,11 @@
             <dependency>
                 <groupId>sibarum.kronometer</groupId>
                 <artifactId>kronometer-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>sibarum.kronometer</groupId>
+                <artifactId>kronometer-anim</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

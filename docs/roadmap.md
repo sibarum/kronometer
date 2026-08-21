@@ -13,7 +13,7 @@ design.
 | ~~**M3**~~ | ~~Rate domains~~ | **done** — 73 tests green; `couple()` deleted, and the design corrected | — |
 | ~~**M4**~~ | ~~The signal graph~~ | **done** — 98 tests green; the horizon split in two | — |
 | ~~**M5**~~ | ~~Precomputation~~ | **done** — 105 tests green; 2.3× on a wide window, and two real bugs caught by the property test | — |
-| **M6** | `kronometer-anim` | easing, interpolation, the closed-form/integrated split (§9) | ~1 week |
+| ~~**M6**~~ | ~~`kronometer-anim`~~ | **done** — 142 tests green; rotation generalized to the Cayley–Dickson tower | — |
 | **M7** | `kronometer-atchung` + headless demo | live input enters the graph at `horizon == now` | ~4 days |
 | **M8** | First real consumer | vexelray-gui adopts it; tactroller harness lands | — |
 
@@ -347,16 +347,56 @@ whole prediction subsystem safe to trust.
 *Decide before starting:* §15.5, whether rate domains nest or are time-scalable. It is small in the
 grid math and large in the horizon math, so it is cheap now and a rewrite afterwards.
 
-## M6 — `kronometer-anim`
+## M6 — `kronometer-anim` ✔ done
 
-The `Ease` library, `Interp` implementations including `SLERP` and shortest-arc `ANGLE` and a
-perceptual color space, `Tween`, `Timeline`, `Animator`, and both smoother families with the
-fixed-domain constraint enforced at construction.
+`Ease`, `Turn`, `Hyper`, `Tween`, `Motion`, `Animator`, `Smooth`. 37 tests in the new module, 142
+across the reactor.
 
-Exit criteria: eases hit exactly 0 and 1 at the endpoints; slerp holds constant angular velocity;
-angle interpolation takes the short way round across the wrap; binding an integrated smoother to a
-dynamic domain fails loudly; a retriggered animation continues from its current interpolated value
-rather than snapping.
+| Exit criterion | Result |
+|---|---|
+| Eases hit exactly 0 and 1 at the endpoints | ✔ — asserted with **zero tolerance** over every constant, found reflectively so a new ease cannot slip past the test |
+| Slerp holds constant angular velocity | ✔ — equal angle between eight consecutive samples, with a lerp shown to fail the same check |
+| Angle interpolation takes the short way round | ✔ — 0.9 to 0.1 turns goes forwards through zero, both directions tested |
+| An integrated smoother on a dynamic domain fails loudly | ✔, at construction, with a message saying what to do instead |
+| A retriggered animation continues from its current value | ✔ — asserted frame by frame: interrupted at 0.4, it unwinds from 0.4 |
+
+### What the implementation taught us
+
+**Retrigger continuity turned out to be free.** `Animator.retarget` reads the cell's current value and
+drives a fresh curve from it, and `Cell.drive` replaces whatever curve was there — so there is nothing
+to cancel and nothing to snap, and the interrupted animation *stays fully precomputable*. The class
+that exists to solve the hard case turns out only to be needed for procedural motions, where a shred
+has to be cancelled. That is a consequence of M4 rather than a feature anyone built.
+
+**Rotation is the level-2 case, as §15.7 asked.** `Hyper` is the Cayley–Dickson tower — real, complex,
+quaternion, octonion — with one recursive product line, so slerp is dimension-generic and quaternion
+slerp falls out rather than being special-cased. Two tests pay for the generality: the basis products
+match the known cases, and **octonion multiplication is asserted non-associative**, which is the
+property that justifies `Tempo` keeping its tree instead of collapsing to an effective scale (§6.3).
+
+**Two value-type bugs, both caught by tests:** the `Hyper` record leaked its internal array through the
+generated accessor (the compact constructor copied in but not out), and `-0.0 != 0.0` under
+`Arrays.equals`, so a rotation computed one way compared unequal to the numerically identical rotation
+computed another. Negative zero is now collapsed at construction.
+
+**Turns are load-bearing, not stylistic.** A thousand accumulated eighth-turns land on *exactly* zero,
+because wrapping is a fractional part. The same loop in radians drifts, since the wrap divides by an
+irrational. `Turn.ofSlope(Ratio)` closes the loop with §15.6: unity slope is an eighth of a turn.
+
+**`Motion.parallel` is where the baton shows off.** Joining branches needs
+`if (child.isAlive()) await(child.done())`, which is a check-then-act race anywhere else — a `Trigger`
+does not latch, so awaiting one that already fired blocks forever. Holding the baton makes it safe,
+and there is a test that joins three already-finished branches to prove it.
+
+### Not built, deliberately
+
+- **Colour interpolation.** The architecture listed it, but a colour space needs the consumer's colour
+  type, and `kronometer-anim` must not depend on vexelray-gui (§13). The *rule* — interpolate
+  perceptually, never in raw sRGB — belongs in the adapter that owns the type.
+- **Animated tempo scales**, deferred again and this time with a reason rather than a shrug: making a
+  scale a signal means the local→global map stops being affine and becomes a piecewise integral, which
+  changes `Tempo`'s conversion model rather than adding to it. That is its own milestone, not a
+  rider on this one.
 
 ## M7 — `kronometer-atchung`, and a headless demo
 

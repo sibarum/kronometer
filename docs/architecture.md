@@ -780,7 +780,7 @@ kronometer-anim  ──  easing and interpolation libraries. depends only on cor
 | Module | Provides |
 |---|---|
 | `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Clock`, `Overrun`, `Rate`, `Trace`. Graph and prediction: `Signal`, `Cell`, `Curve`, `Effect`, horizons, precompute pool. The `Ease` and `Interp` *interfaces*. Pure Java, no dependencies. |
-| `kronometer-anim` | The libraries: `Ease` curves, `Interp` implementations (`SLERP`, `ANGLE`, color spaces), `Tween`, `Timeline`, `Animator`, closed-form and integrated smoothers. |
+| `kronometer-anim` | The libraries: `Ease` curves, `Turn` (angles in turns, shortest-arc), `Hyper` (the Cayley–Dickson tower with dimension-generic slerp), `Tween`, `Motion`, `Animator`, `Smooth`. Colour interpolation deliberately absent — it needs the consumer's colour type, so it belongs in the adapter. |
 | `kronometer-atchung` | Await an Atchung `Topic` as a yield point; publish on the timeline; drive a `Pump`; carry elektro-Q messages onto it. Peer-to-peer, mirroring `atchung-elektroq`. |
 | `kronometer-demo` | The showcase — headless, so it stays free of a GUI dependency. |
 
