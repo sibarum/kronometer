@@ -82,6 +82,9 @@ public final class Rate {
     private int overCount;
     private int underCount;
     private boolean started;
+    private Shred driver;
+    private final java.util.concurrent.CopyOnWriteArrayList<Consumer<Step>> handlers =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.CopyOnWriteArrayList<Sampled<?>> samplers =
             new java.util.concurrent.CopyOnWriteArrayList<>();
     private final java.util.concurrent.CopyOnWriteArrayList<Prediction<?>> predictions =
@@ -237,12 +240,25 @@ public final class Rate {
         return List.copyOf(predictions);
     }
 
-    /** Run {@code handler} once per step, forever, on this domain's own shred. */
+    /**
+     * Run {@code handler} once per step, forever, on this domain's shred.
+     *
+     * <p>Callable more than once: handlers run in <b>registration order</b> within a single step, on one
+     * shred. That is not a convenience — it is the only thing that makes input composable. A bridge that
+     * delivers bus events must run before the effects that read them, and registering first is how you
+     * say so. One handler per domain would have forced a domain per handler, and then the ordering
+     * question would come back as a priority argument for something that is really just a sequence.
+     *
+     * @return the shred driving this domain — the same one for every handler
+     */
     public Shred each(Consumer<Step> handler) {
         Objects.requireNonNull(handler, "handler");
-        requireUnstarted();
+        handlers.add(handler);
+        if (started) {
+            return driver;
+        }
         started = true;
-        return kron.sporkDomain(this, () -> {
+        driver = kron.sporkDomain(this, () -> {
             originLocal = tempo.elapsed();
             lastStep = Time.now();
             kron.predictor().fill(this, predictions);       // so the first step is a hit, not a miss
@@ -253,7 +269,9 @@ public final class Rate {
                 for (Prediction<?> prediction : predictions) {
                     prediction.primeInto(step.index(), Time.now(), kron.graph().version());
                 }
-                handler.accept(step);
+                for (Consumer<Step> h : handlers) {
+                    h.accept(step);
+                }
                 completed++;
                 for (Sampled<?> sampled : samplers) {
                     sampled.commit(step.at(), step.dt());
@@ -262,6 +280,7 @@ public final class Rate {
                 kron.predictor().fill(this, predictions);   // top the window back up
             }
         });
+        return driver;
     }
 
     // -------------------------------------------------------------- internals

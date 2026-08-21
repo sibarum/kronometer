@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>sibarum.kronometer</groupId>
+        <artifactId>kronometer</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>kronometer-demo</artifactId>
+
+    <name>Kronometer :: demo</name>
+    <description>Everything at once, headless: nested tempos, three rate domains, live input from an
+        Atchung bus, precomputed animation, and a trace you can read. Headless on purpose, so the
+        reactor never grows a GUI dependency.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>sibarum.kronometer</groupId>
+            <artifactId>kronometer-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>sibarum.kronometer</groupId>
+            <artifactId>kronometer-anim</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>sibarum.kronometer</groupId>
+            <artifactId>kronometer-atchung</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+</project>

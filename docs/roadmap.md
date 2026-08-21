@@ -14,7 +14,7 @@ design.
 | ~~**M4**~~ | ~~The signal graph~~ | **done** — 98 tests green; the horizon split in two | — |
 | ~~**M5**~~ | ~~Precomputation~~ | **done** — 105 tests green; 2.3× on a wide window, and two real bugs caught by the property test | — |
 | ~~**M6**~~ | ~~`kronometer-anim`~~ | **done** — 142 tests green; rotation generalized to the Cayley–Dickson tower | — |
-| **M7** | `kronometer-atchung` + headless demo | live input enters the graph at `horizon == now` | ~4 days |
+| ~~**M7**~~ | ~~`kronometer-atchung` + headless demo~~ | **done** — 155 tests green; idle-parking closed, invalidation made targeted | — |
 | **M8** | First real consumer | vexelray-gui adopts it; tactroller harness lands | — |
 
 Cross-cutting rules, every milestone:
@@ -398,7 +398,63 @@ and there is a test that joins three already-finished branches to prove it.
   changes `Tempo`'s conversion model rather than adding to it. That is its own milestone, not a
   rider on this one.
 
-## M7 — `kronometer-atchung`, and a headless demo
+## M7 — `kronometer-atchung`, and a headless demo ✔ done
+
+`KronBridge`, `kronometer-demo`, plus two core changes M7 forced. 155 tests across six modules.
+
+| Exit criterion | Result |
+|---|---|
+| Live input enters the graph at `horizon == now` | ✔ — and nothing downstream of it is precomputed, without anything downstream being told |
+| A topic is a yield point | ✔ — `await(bridge.trigger(CLICK))`, resuming at the moment of the drain |
+| Publishing from the timeline reaches ordinary subscribers | ✔ |
+| The demo is headless and reproducible | ✔ — 50 runs, identical schedules |
+
+### The pump is the seam
+
+Two incompatible threading models: the bus publishes on whoever published, because that is what makes
+it fast; the timeline is single-threaded, because that is what makes it ordered. Atchung already has the
+right tool — a `Pump` lets the consumer choose the delivery thread — so the bridge subscribes pumped and
+the **kernel drains on the timeline**. Input latency is then bounded by the draining domain's period, one
+frame for a GUI, and that is not a tunable: lower latency would mean mutating the graph off the timeline,
+which is the one thing the design does not permit.
+
+### Two core changes M7 forced
+
+1. **Idle-parking, deferred since M2 and finally due.** `run()` returned the instant the timeline
+   emptied, which made an externally-fed application impossible — only scripted ones worked. The kernel
+   now parks when nothing is scheduled, *if* the clock is paced and shreds are alive; under the virtual
+   clock an empty timeline is still the stall it always was, because there is no wall to wait against.
+   Waking needs `stop()` too: an idle kernel is waiting on the outside world, so there is no moment at
+   which to schedule its own shutdown. `KronBridgeTest.externalPublishWakesTheKernel` is a test that
+   could not have existed before this.
+2. **A domain now runs many handlers, in registration order.** One handler per domain meant
+   `bridge.drainOn(frames)` and any effect on `frames` collided. Registration order is not a
+   convenience — it is what makes input composable: the bridge registers first, so effects see *this*
+   step's input rather than the previous step's. One handler per domain would have forced a domain per
+   handler, and the ordering question would have come back as a priority argument for what is really
+   just a sequence.
+
+### What the demo found
+
+**Invalidation was global, and M5 and M7 were undermining each other.** The demo showed 72 % prediction
+waste on an animation with exactly one genuine invalidation: `graph.invalidate` discarded *every*
+prediction, so live input arriving each frame threw away the predicted future of everything in the
+program. Precomputation would have been useless in precisely the application that wants it.
+
+Invalidation is now **targeted** — it walks the dependency sets the graph already records and retracts
+only predictions that actually read the changed source. Waste fell to 34 % (the real retrigger) and
+buffer hits rose from 15 to 22 of 23 frames. Over-discarding was never a correctness bug, which is
+exactly why it survived M5's property test and needed a realistic scenario to surface: a differential
+test cannot see work that is merely wasted.
+
+### Deferred
+
+- **elektro-Q.** The mechanism is identical — a `Conduit` delivers on its own thread, so it posts to the
+  timeline like everything else — so building it twice would prove nothing new. It needs a second
+  dependency and belongs with a use case that wants it.
+- **Animated tempo scales**, still. Fourth time; still its own milestone.
+
+## M7 — original plan
 
 `Topic` as a yield point, `Topic` driving a `Cell` (the natural way live input enters the graph, at
 `horizon == now`), publishing on the timeline, kernel-driven `Pump`, elektro-Q messages as timeline

@@ -156,9 +156,29 @@ final class Graph {
      * delivered for an earlier moment was correct when it was delivered, and rewriting history is
      * neither possible nor desirable.
      */
+    /** A change whose origin is not a single signal — a tempo rescale. Retracts everything. */
     void invalidate(Moment at) {
+        invalidate(at, null);
+    }
+
+    /**
+     * Something changed at {@code at}, and {@code source} is where.
+     *
+     * <p>The source matters, and M7 is where finding that out became unavoidable. The version bump has
+     * to be global — it is one counter, and a memo is per-moment anyway, so recomputing at the current
+     * moment is cheap. But <b>discarding buffers</b> globally is not cheap, and the demo made that
+     * obvious: live input arriving every frame threw away the predicted future of an animation that had
+     * nothing to do with it, leaving 72 % waste on a signal that was genuinely invalidated once. Live
+     * input and precomputation would have undermined each other in exactly the application that wants
+     * both.
+     *
+     * <p>So a targeted invalidation only retracts predictions that actually <em>depend</em> on the
+     * source. Over-discarding was never a correctness bug — it is safe to throw away something true —
+     * which is why it survived M5's property test and needed a realistic scenario to surface.
+     */
+    void invalidate(Moment at, Signal<?> source) {
         version++;
-        kron.discardPredictionsAfter(at);
+        kron.discardPredictionsAfter(at, source);
         for (Effect effect : List.copyOf(reactive)) {
             effect.scheduleRerun(at);
         }

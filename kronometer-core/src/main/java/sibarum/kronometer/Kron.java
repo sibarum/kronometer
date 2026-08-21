@@ -90,6 +90,14 @@ public final class Kron implements AutoCloseable {
     private final Gate kernelGate = new Gate();
     /** Caller to kernel: run a batch. Single-permit, so ticks arriving mid-batch coalesce. */
     private final Gate kernelStart = new Gate();
+    /**
+     * Anything to kernel: wake up, the timeline may have work now.
+     *
+     * <p>A {@link Gate} rather than a monitor because it tolerates being opened before anyone is
+     * waiting, which is exactly the race an external post has to survive: the event may arrive in the
+     * instant between the kernel deciding it is idle and actually parking.
+     */
+    private final Gate idleGate = new Gate();
 
     /**
      * Kernel to caller: batch completion, by ticket.
@@ -107,6 +115,7 @@ public final class Kron implements AutoCloseable {
     private Runnable batchBefore;
     private long batchLimitNanos = UNBOUNDED;
     private volatile boolean kernelStopping;
+    private volatile boolean stopRequested;
     private volatile boolean running;
     private volatile long nextDeadlineNanos = Long.MAX_VALUE;
 
@@ -255,12 +264,43 @@ public final class Kron implements AutoCloseable {
      * <p>Called by the graph on every invalidation. Strictly after, because a sample already delivered
      * for an earlier grid line was correct when it was delivered.
      */
-    void discardPredictionsAfter(Moment at) {
+    void discardPredictionsAfter(Moment at, Signal<?> source) {
         for (Rate domain : domains) {
             for (Prediction<?> prediction : domain.predictions()) {
-                prediction.discardAfter(at);
+                if (source == null || dependsOn(prediction.signal(), source)) {
+                    prediction.discardAfter(at);
+                }
             }
         }
+    }
+
+    /**
+     * Whether {@code node} reads {@code target}, directly or through any chain.
+     *
+     * <p>Walks the dependency sets the graph already records from reading, so nothing extra has to be
+     * declared. A {@code Cell} has no dependencies of its own unless it is following another signal,
+     * which is the one edge the read-registration does not capture on the cell itself.
+     */
+    private boolean dependsOn(Signal<?> node, Signal<?> target) {
+        java.util.Set<Signal<?>> seen =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        java.util.Deque<Signal<?>> pending = new java.util.ArrayDeque<>();
+        pending.push(node);
+        while (!pending.isEmpty()) {
+            Signal<?> current = pending.pop();
+            if (current == target) {
+                return true;
+            }
+            if (!seen.add(current)) {
+                continue;
+            }
+            if (current instanceof Derived<?> derived) {
+                pending.addAll(derived.dependencies());
+            } else if (current instanceof Cell<?> cell && cell.followedSource() != null) {
+                pending.push(cell.followedSource());
+            }
+        }
+        return false;
     }
 
     /** A mutable source in the graph, in the root tempo. */
@@ -424,6 +464,7 @@ public final class Kron implements AutoCloseable {
             postAt(at, task);
         } else {
             inbox.add(() -> postAt(at, task));
+            idleGate.open();                    // the kernel may be parked waiting for exactly this
         }
     }
 
@@ -444,12 +485,39 @@ public final class Kron implements AutoCloseable {
             sporkAt(now, Detach.YES, "post", task);
         } else {
             inbox.add(() -> sporkAt(now, Detach.YES, "post", task));
+            idleGate.open();
         }
     }
 
-    /** Run until nothing is scheduled. */
+    /**
+     * Run until nothing is scheduled — or, on a paced clock with shreds still alive, until
+     * {@link #stop()} or {@link #close()}.
+     *
+     * <p>The difference matters for an application fed from outside. Under the virtual clock an empty
+     * timeline with live shreds is a bug (nothing can ever happen, so {@code TimelineStalled} says so),
+     * but under a paced clock it is just an application waiting for input, and the kernel parks until
+     * something arrives. That is what makes a real event-driven program possible rather than only a
+     * scripted one.
+     */
     public void run() {
         runUntil(null);
+    }
+
+    /**
+     * Ask a running {@link #run()} to return. Safe from any thread, including from a shred.
+     *
+     * <p>Needed because an idle-parked kernel is waiting on external input, not on the timeline, so
+     * there is no moment at which to schedule its own shutdown. This wakes it and lets {@code run()}
+     * unwind normally; {@link #close()} then cancels whatever is still alive.
+     */
+    public void stop() {
+        stopRequested = true;
+        idleGate.open();
+    }
+
+    /** Whether {@link #stop()} has been asked for. */
+    public boolean isStopping() {
+        return stopRequested;
     }
 
     /**
@@ -496,6 +564,8 @@ public final class Kron implements AutoCloseable {
         }
         closed = true;
         draining = true;
+        stopRequested = true;
+        idleGate.open();                        // in case run() is parked waiting for input
         if (!alive.isEmpty()) {
             pump(() -> {
                 for (Shred s : List.copyOf(alive)) {
@@ -602,6 +672,22 @@ public final class Kron implements AutoCloseable {
         while (true) {
             drainInbox();
             Entry next = peekLive();
+
+            // Nothing scheduled, but the timeline is not over: an externally-fed application spends
+            // most of its life here, waiting for input that has not arrived yet. Parking is only ever
+            // right for an *unbounded* run on a *paced* clock — a window has an end, and a virtual clock
+            // has no wall to wait against, so for it an empty timeline with live shreds is still the
+            // stall it always was.
+            if (next == null && limit == null && !clock.isVirtual()
+                    && !draining && !stopRequested && !alive.isEmpty()) {
+                nextDeadlineNanos = Long.MAX_VALUE;
+                idleGate.await();
+                if (stopRequested) {
+                    return;
+                }
+                continue;
+            }
+
             if (next == null || (limit != null && next.moment().isAfter(limit))) {
                 nextDeadlineNanos = next == null ? Long.MAX_VALUE : next.moment().nanos();
                 // A bounded run is a window over the timeline, so an empty window is a legitimate
@@ -783,7 +869,18 @@ public final class Kron implements AutoCloseable {
             shred.requestCancel();
         } else {
             inbox.add(shred::requestCancel);
+            idleGate.open();
         }
+    }
+
+    /**
+     * The on-timeline check, for adapter modules that must enforce it too.
+     *
+     * <p>Public because a bridge in another module needs exactly the same guard, and the alternative was
+     * for it to reimplement the check against a weaker signal.
+     */
+    public void requireOnTimelineForBridge(String operation) {
+        requireOnTimeline(operation);
     }
 
     void requireOnTimeline(String operation) {

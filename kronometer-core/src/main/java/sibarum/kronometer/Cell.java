@@ -87,7 +87,7 @@ public final class Cell<T> implements Signal<T> {
         }
         this.curve = null;
         this.source = null;
-        graph.invalidate(kron.now());
+        graph.invalidate(kron.now(), this);
     }
 
     /**
@@ -101,7 +101,7 @@ public final class Cell<T> implements Signal<T> {
         this.mode = Mode.LIVE;
         this.curve = null;
         this.source = null;
-        graph.invalidate(kron.now());
+        graph.invalidate(kron.now(), this);
         return this;
     }
 
@@ -123,7 +123,7 @@ public final class Cell<T> implements Signal<T> {
                 : tempo.globalAt(curveStartLocal.plus(curve.extent()));
         this.mode = Mode.DRIVEN;
         this.source = null;
-        graph.invalidate(now);
+        graph.invalidate(now, this);
         return this;
     }
 
@@ -134,7 +134,7 @@ public final class Cell<T> implements Signal<T> {
         this.source = source;
         this.mode = Mode.FOLLOWING;
         this.curve = null;
-        graph.invalidate(kron.now());
+        graph.invalidate(kron.now(), this);
         return this;
     }
 
@@ -146,8 +146,13 @@ public final class Cell<T> implements Signal<T> {
         this.mode = Mode.HELD;
         this.curve = null;
         this.source = null;
-        graph.invalidate(kron.now());
+        graph.invalidate(kron.now(), this);
         return this;
+    }
+
+    /** The signal this cell mirrors, if it is following one. */
+    Signal<T> followedSource() {
+        return mode == Mode.FOLLOWING ? source : null;
     }
 
     /** Whether this cell has been declared volatile by {@link #live()}. */

@@ -18,6 +18,8 @@
     <modules>
         <module>kronometer-core</module>
         <module>kronometer-anim</module>
+        <module>kronometer-atchung</module>
+        <module>kronometer-demo</module>
         <module>kronometer-bench</module>
     </modules>
 

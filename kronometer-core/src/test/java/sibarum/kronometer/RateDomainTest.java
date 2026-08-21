@@ -177,9 +177,27 @@ class RateDomainTest {
             Rate rate = kron.fixed(ms(10));
             rate.each(step -> { });
             assertThrows(IllegalStateException.class, () -> rate.priority(5));
+            // each() is deliberately *not* in this list — see multipleHandlersRunInRegistrationOrder.
             assertThrows(IllegalStateException.class, () -> rate.maxCatchUp(1));
-            assertThrows(IllegalStateException.class, () -> rate.each(step -> { }));
+            assertThrows(IllegalStateException.class, () -> rate.lookahead(ms(1)));
         }
+    }
+
+    @Test
+    @DisplayName("a domain runs every registered handler, in registration order")
+    void multipleHandlersRunInRegistrationOrder() {
+        try (Kron kron = Kron.virtual()) {
+            Rate frames = kron.fixed(ms(10));
+            // Registration order is the whole ordering contract for handlers on one domain, and it is
+            // what makes input composable: a bridge that delivers bus events registers first, so the
+            // effects that read them see this step's input rather than the previous step's (M7).
+            frames.each(step -> log.add("drain@" + step.at()));
+            frames.each(step -> log.add("render@" + step.at()));
+
+            kron.runUntil(Moment.ORIGIN.plus(ms(20)));
+        }
+        assertEquals(List.of(
+                "drain@@10ms", "render@@10ms", "drain@@20ms", "render@@20ms"), log);
     }
 
     @Test
