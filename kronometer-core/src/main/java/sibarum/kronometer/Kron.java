@@ -84,6 +84,7 @@ public final class Kron implements AutoCloseable {
     private final java.util.concurrent.CopyOnWriteArrayList<Tempo> tempos =
             new java.util.concurrent.CopyOnWriteArrayList<>();
     private final Graph graph = new Graph(this);
+    private final Predictor predictor = new Predictor(this);
 
     /** Shred to kernel: the baton coming back. */
     private final Gate kernelGate = new Gate();
@@ -233,6 +234,33 @@ public final class Kron implements AutoCloseable {
 
     Graph graph() {
         return graph;
+    }
+
+    Predictor predictor() {
+        return predictor;
+    }
+
+    /** Every prediction buffer on this runtime, for diagnostics. */
+    public java.util.List<Prediction<?>> predictions() {
+        java.util.List<Prediction<?>> all = new java.util.ArrayList<>();
+        for (Rate domain : domains) {
+            all.addAll(domain.predictions());
+        }
+        return java.util.List.copyOf(all);
+    }
+
+    /**
+     * Retract every prediction for a moment strictly after { at}.
+     *
+     * <p>Called by the graph on every invalidation. Strictly after, because a sample already delivered
+     * for an earlier grid line was correct when it was delivered.
+     */
+    void discardPredictionsAfter(Moment at) {
+        for (Rate domain : domains) {
+            for (Prediction<?> prediction : domain.predictions()) {
+                prediction.discardAfter(at);
+            }
+        }
     }
 
     /** A mutable source in the graph, in the root tempo. */
@@ -476,6 +504,7 @@ public final class Kron implements AutoCloseable {
             }, null, true);
         }
         stopKernelThread();
+        predictor.close();
         failures.clear();
         stall = null;
     }

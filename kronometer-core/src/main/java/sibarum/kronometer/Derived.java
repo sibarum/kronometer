@@ -36,6 +36,12 @@ final class Derived<T> implements Signal<T> {
     @Override
     public T at(Moment at) {
         graph.observe(this);
+        if (graph.isUncached()) {
+            // Evaluating ahead, on a pool thread. The shared memo belongs to the timeline and to
+            // `now`; writing it from here would be the data race M4 warned about. A frame-local memo
+            // keeps the diamond property without touching anything shared.
+            return graph.localMemo(this, () -> graph.evaluateAhead(at, body));
+        }
         if (cachedAt != null && cachedAt.equals(at) && cachedVersion == graph.version()) {
             return cachedValue;
         }
@@ -45,6 +51,20 @@ final class Derived<T> implements Signal<T> {
         cachedAt = at;
         cachedVersion = graph.version();
         return cachedValue;
+    }
+
+    /**
+     * Seed the memo with a value computed ahead of time.
+     *
+     * <p>This is how precomputation stays invisible: the buffered value enters by the same door
+     * evaluation would have used, so an effect reading {@code get()} cannot tell the difference. It also
+     * means the property test in {@code PrecomputeTest} is testing something real — if a body is impure,
+     * the primed value and the evaluated one diverge and the test says so.
+     */
+    void prime(Moment at, long version, T value) {
+        this.cachedAt = at;
+        this.cachedVersion = version;
+        this.cachedValue = value;
     }
 
     @Override

@@ -607,11 +607,35 @@ is the opposite kind of work and wants every remaining core.
 Consequences worth stating plainly:
 
 - **A finite, near horizon is computed whole.** A 200 ms tween at 60 Hz is twelve samples; compute
-  them once, on spork, and the animation costs nothing again.
-- **Reading at `now` is a buffer index.** No allocation, no math, no jitter, no lock.
-- **Audio is the same code.** `hz(48_000).block(256)` renders 100 ms ahead in vectorizable blocks;
-  the audio callback copies.
+  them once and the animation costs nothing again. Past `varyingUntil` (§7.1) the tail collapses to a
+  single stored constant rather than a thousand identical samples.
+- **Reading at `now` is a buffer index.** No allocation, no math, no lock.
 - **The horizon is the jitter budget**, which is §10.
+
+### 8.1 Refill in bursts, not dribbles — measured in M5
+
+The single most important implementation fact about this section, and it was not obvious from the
+design ([benchmarks/precompute.md](benchmarks/precompute.md)):
+
+> A sliding window in steady state needs **one new sample per step**, whoever computes it.
+
+So topping the buffer up by one sample at the end of every step is *precisely* the work lazy evaluation
+would have done — one sample at a time, on the timeline — with a buffer bolted on for decoration. The
+first working implementation did exactly that and measured, to within noise, **exactly no improvement**.
+
+The fill therefore waits until the buffer is half empty and then refills the whole window in one
+parallel batch. Most steps become a pure buffer read; the arithmetic happens in one go. That is the only
+shape in which "embarrassingly parallel" cashes out, and it is what an audio engine does, for the same
+reason. Measured at 100 ms of lookahead over 48 kHz: **2.3×**.
+
+Two corollaries fall out, and both are limits rather than details:
+
+- **Lookahead is what buys the speedup.** A two-frame window has nothing to burst — half of two is one —
+  so it measures at parity. Prediction is *free* there, not useful. A domain that declares no lookahead
+  should expect no gain.
+- **Small batches must not go near the pool.** A platform-thread round trip is ~14 µs (§3.1); a sample is
+  a few. Dispatching a one-sample top-up made prediction three times slower than not predicting, so
+  batches below a measured threshold stay on the timeline.
 
 ## 9. Interpolation
 

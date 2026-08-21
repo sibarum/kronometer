@@ -78,7 +78,13 @@ public final class Cell<T> implements Signal<T> {
     public void set(T value) {
         kron.requireOnTimeline("Cell.set()");
         this.held = value;
-        this.mode = Mode.HELD;
+        // A write does not un-declare volatility. `live()` is a promise about *how this cell behaves*,
+        // and writing to it is precisely the behaviour promised — so an input adapter that calls set()
+        // per event stays unpredictable, rather than becoming predictable on its first event, which is
+        // backwards and was the second bug M5's property test found.
+        if (mode != Mode.LIVE) {
+            this.mode = Mode.HELD;
+        }
         this.curve = null;
         this.source = null;
         graph.invalidate(kron.now());

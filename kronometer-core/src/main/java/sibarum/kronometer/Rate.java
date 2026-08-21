@@ -84,6 +84,8 @@ public final class Rate {
     private boolean started;
     private final java.util.concurrent.CopyOnWriteArrayList<Sampled<?>> samplers =
             new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final java.util.concurrent.CopyOnWriteArrayList<Prediction<?>> predictions =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
 
     Rate(Kron kron, String name, Kind kind, Dur period, Tempo tempo) {
         this.kron = kron;
@@ -209,6 +211,32 @@ public final class Rate {
         return sampled;
     }
 
+    /**
+     * Compute {@code signal}'s future on this domain's grid, ahead of {@code now}.
+     *
+     * <p>Requires a fixed grid, and the reason is not an implementation shortcut: a dynamic domain's
+     * sample points are whatever the display decides, so there is no grid to fill in advance. A dynamic
+     * consumer that wants predicted values reads them from a fixed domain through
+     * {@link #sample}, which is the machinery M3 already built for exactly this shape of problem.
+     */
+    public <T> Prediction<T> predict(Signal<T> signal) {
+        return predict(signal, Predict.EAGER);
+    }
+
+    public <T> Prediction<T> predict(Signal<T> signal, Predict policy) {
+        Objects.requireNonNull(signal, "signal");
+        Objects.requireNonNull(policy, "policy");
+        requireFixed("predict");
+        Prediction<T> prediction = new Prediction<>(signal, this, policy);
+        predictions.add(prediction);
+        return prediction;
+    }
+
+    /** The prediction buffers on this domain, for diagnostics. */
+    public List<Prediction<?>> predictions() {
+        return List.copyOf(predictions);
+    }
+
     /** Run {@code handler} once per step, forever, on this domain's own shred. */
     public Shred each(Consumer<Step> handler) {
         Objects.requireNonNull(handler, "handler");
@@ -217,14 +245,21 @@ public final class Rate {
         return kron.sporkDomain(this, () -> {
             originLocal = tempo.elapsed();
             lastStep = Time.now();
+            kron.predictor().fill(this, predictions);       // so the first step is a hit, not a miss
             while (true) {
                 Step step = kind == Kind.FIXED ? nextFixed() : nextDynamic();
+                // Feed this moment's buffered values into the memo *before* the handler runs, so an
+                // effect reading get() is served an index lookup and cannot tell prediction happened.
+                for (Prediction<?> prediction : predictions) {
+                    prediction.primeInto(step.index(), Time.now(), kron.graph().version());
+                }
                 handler.accept(step);
                 completed++;
                 for (Sampled<?> sampled : samplers) {
                     sampled.commit(step.at(), step.dt());
                 }
                 considerRateChange();
+                kron.predictor().fill(this, predictions);   // top the window back up
             }
         });
     }
@@ -253,6 +288,24 @@ public final class Rate {
      */
     private Moment gridLine(long n) {
         return tempo.globalAt(originLocal.plus(period.times(n)));
+    }
+
+    /** The n-th grid line. Precomputation keys buffers by index, so it needs this by name. */
+    Moment gridLineAt(long n) {
+        return gridLine(n);
+    }
+
+    /** The highest grid index at or before {@code at}. */
+    long gridIndexAtOrBefore(Moment at) {
+        if (originLocal == null) {
+            return -1;
+        }
+        return Math.floorDiv(tempo.elapsedAt(at).minus(originLocal).nanos(), period.nanos());
+    }
+
+    /** The lowest grid index strictly after {@code at} — where a fill window starts. */
+    long gridIndexAfter(Moment at) {
+        return gridIndexAtOrBefore(at) + 1;
     }
 
     /**

@@ -12,7 +12,7 @@ design.
 | ~~**M2**~~ | ~~Realtime + driven clocks, slip~~ | **done** — 55 tests green; pacing jitter cut 40×. [Results](benchmarks/slip.md) | — |
 | ~~**M3**~~ | ~~Rate domains~~ | **done** — 73 tests green; `couple()` deleted, and the design corrected | — |
 | ~~**M4**~~ | ~~The signal graph~~ | **done** — 98 tests green; the horizon split in two | — |
-| **M5** | Precomputation | prediction is observationally invisible (§8) | ~1 week |
+| ~~**M5**~~ | ~~Precomputation~~ | **done** — 105 tests green; 2.3× on a wide window, and two real bugs caught by the property test | — |
 | **M6** | `kronometer-anim` | easing, interpolation, the closed-form/integrated split (§9) | ~1 week |
 | **M7** | `kronometer-atchung` + headless demo | live input enters the graph at `horizon == now` | ~4 days |
 | **M8** | First real consumer | vexelray-gui adopts it; tactroller harness lands | — |
@@ -273,7 +273,65 @@ one-pending-re-run-per-effect a cascade would not converge within a moment.
   set rather than discovering one — worth writing down now, because getting it wrong is a data race in
   the one place this design promised there could not be one.
 
-## M5 — Precomputation
+## M5 — Precomputation ✔ done
+
+`Predict`, `Prediction`, `Predictor`, plus thread-confined evaluation contexts and `Derived.prime`.
+105 tests. Full measurements: [benchmarks/precompute.md](benchmarks/precompute.md).
+
+| Exit criterion | Result |
+|---|---|
+| Prediction is observationally invisible | ✔ — differential test over 200 seeds × 3 policies, comparing against the lazy path as reference |
+| An invalidation discards the future and only the future | ✔ |
+| A volatile signal is not predicted at all | ✔ — nothing filled |
+| The constant tail collapses to one sample | ✔ — a 500 ms window over a 20 ms curve fills <15 samples, not 50 |
+| Waste is metered and drives automatic demotion | ✔, hysteretic |
+| Concurrent evaluation is safe | ✔ — evaluation state moved to thread-confined frames, as M4 flagged |
+
+### The property test earned its keep immediately — two real bugs
+
+1. **The constant tail was not truncated on invalidation.** A tail is a half-open interval
+   `[index, ∞)`, and I only dropped it when its *start* was after the invalidation moment. A tail
+   beginning before and extending past kept serving stale values indefinitely. Caught on seed 2 of the
+   differential test, which is exactly the kind of bug no hand-written example would have found.
+2. **`Cell.set()` silently un-declared volatility.** `live()` is a promise about *how a cell behaves*,
+   but `set()` reset the mode to `HELD` — so an input adapter writing on every event made its cell
+   *predictable* on the first event. Precisely backwards.
+
+### The performance story took four attempts, and the last one is the finding
+
+> A sliding window in steady state needs **one new sample per step**, whoever computes it.
+
+So topping the buffer up by one sample per step is exactly the work lazy evaluation would have done,
+with a buffer bolted on for decoration — and it measured as exactly that: no improvement. Refilling in
+**bursts** when the buffer is half empty is what makes the parallelism real: **2.3×** at 100 ms of
+lookahead over 48 kHz. A two-frame window still measures at parity, and that is the honest answer —
+lookahead is what buys the speedup, so a domain declaring none should expect none.
+
+Two prerequisites had to be fixed before any of that was visible: the fill re-walked the whole window
+every step (4 800 map probes per step for an audio window), and dispatching a single sample to the pool
+cost ~14 µs against a ~3 µs sample. Both made prediction *slower* than not predicting.
+
+And the harness itself was wrong three times. Its first version reported prediction as 70 % slower on
+numbers that were entirely JIT warmup — 18 000 ns/step against a real per-step cost of 520–822 ns.
+**Same failure mode as M0**: a plausible distribution measuring the wrong quantity. The fix both times
+was to isolate the layer instead of reasoning about the aggregate. A by-layer breakdown confirmed the
+kernel had not regressed at all (520 ns, against M1's 511 ns) and put prediction's own overhead at
+~180 ns per step.
+
+### Deliberately narrowed, and why
+
+- **The fill is a burst with the timeline paused**, not a background thread. Filling concurrently would
+  mean workers reading `Cell` state while a shred mutates it, which needs every readable field safely
+  published — a much bigger correctness surface than this milestone should open. The cost is that the
+  burst's wall time is charged to the current segment, so it spends `slack()` and can become slip,
+  which the existing instruments already measure.
+- **Dynamic domains cannot be predicted**, and this is a limit in principle rather than in code: their
+  sample points are whatever the display decides, so there is no grid to fill ahead. A dynamic consumer
+  reads predicted values from a fixed domain through `sample()` — the machinery M3 already built.
+- **Animated tempo scales** still deferred; `Tempo.horizon()` is unconditionally `FOREVER`, correct for
+  constant and discretely-changed scales. Moves to M6 with the interpolation library that needs it.
+
+## M5 — original plan
 
 The per-domain worker pool, per-signal ring buffers, `EAGER`/`LAZY`/`NEVER`, invalidation-after-moment,
 waste metering and automatic demotion.

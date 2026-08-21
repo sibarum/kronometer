@@ -3,9 +3,12 @@ package sibarum.kronometer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * The signal graph's bookkeeping: dependency collection, versioning, and invalidation.
@@ -28,6 +31,12 @@ import java.util.Set;
  * turns out wrong is always discarded before any effect could have acted on it. That is what licenses
  * a merely-held {@link Cell} to be predicted as constant rather than treated as unknowable: being
  * wrong costs recomputation, never correctness.
+ *
+ * <h2>Why evaluation state is thread-confined</h2>
+ *
+ * M4 kept the collection deques on the graph itself, which was fine while only the timeline evaluated.
+ * Precomputation evaluates the same signals on a pool, so shared deques would be a data race in the one
+ * place this design promised there could not be one. Each thread now carries its own {@link Frame}.
  */
 final class Graph {
 
@@ -36,14 +45,24 @@ final class Graph {
     /** Bumped by every invalidation. Part of every memoization key. */
     private long version;
 
-    /** The dependency sets being collected, innermost last. Non-empty only during evaluation. */
-    private final Deque<Set<Signal<?>>> collecting = new ArrayDeque<>();
-
-    /** The moment being evaluated for, which is not always {@code now} — precomputation asks about later. */
-    private final Deque<Moment> evaluatingAt = new ArrayDeque<>();
-
     /** Effects that re-run when something they read changes, rather than on a rate. */
     private final List<Effect> reactive = new ArrayList<>();
+
+    /**
+     * One thread's evaluation state.
+     *
+     * <p>{@code uncached} marks a precompute evaluation, which must not write to any signal's shared
+     * memo — the memo belongs to the timeline and to {@code now}. It gets a frame-local memo instead,
+     * so a diamond still evaluates its apex once per moment even off the timeline.
+     */
+    private static final class Frame {
+        final Deque<Set<Signal<?>>> collecting = new ArrayDeque<>();
+        final Deque<Moment> evaluatingAt = new ArrayDeque<>();
+        final Map<Signal<?>, Object> localMemo = new IdentityHashMap<>();
+        int uncachedDepth;
+    }
+
+    private final ThreadLocal<Frame> frames = ThreadLocal.withInitial(Frame::new);
 
     Graph(Kron kron) {
         this.kron = kron;
@@ -59,29 +78,72 @@ final class Graph {
 
     /** The moment evaluation is happening for; {@code now} when nothing is being evaluated. */
     Moment evaluatingAt() {
-        Moment at = evaluatingAt.peek();
+        Moment at = frames.get().evaluatingAt.peek();
         return at == null ? kron.now() : at;
+    }
+
+    /** Whether this thread is evaluating ahead, and so must not touch shared memos. */
+    boolean isUncached() {
+        return frames.get().uncachedDepth > 0;
     }
 
     /** Register that the value being evaluated read {@code source}. */
     void observe(Signal<?> source) {
-        Set<Signal<?>> deps = collecting.peek();
+        Set<Signal<?>> deps = frames.get().collecting.peek();
         if (deps != null) {
             deps.add(source);
         }
     }
 
-    /** Evaluate {@code body} at {@code at}, collecting what it reads. */
-    <T> Evaluation<T> evaluate(Moment at, java.util.function.Supplier<T> body) {
+    /** Evaluate {@code body} at {@code at}, collecting what it reads. For the timeline. */
+    <T> Evaluation<T> evaluate(Moment at, Supplier<T> body) {
+        Frame frame = frames.get();
         Set<Signal<?>> deps = new LinkedHashSet<>();
-        collecting.push(deps);
-        evaluatingAt.push(at);
+        frame.collecting.push(deps);
+        frame.evaluatingAt.push(at);
         try {
             return new Evaluation<>(body.get(), deps);
         } finally {
-            evaluatingAt.pop();
-            collecting.pop();
+            frame.evaluatingAt.pop();
+            frame.collecting.pop();
         }
+    }
+
+    /**
+     * Evaluate {@code body} at {@code at} without writing to any shared memo. For the precompute pool.
+     *
+     * <p>The frame-local memo is cleared at the top of each such evaluation, so it scopes to exactly
+     * one moment — which is what makes it safe to key by identity alone.
+     */
+    <T> T evaluateAhead(Moment at, Supplier<T> body) {
+        Frame frame = frames.get();
+        boolean outermost = frame.uncachedDepth == 0;
+        if (outermost) {
+            frame.localMemo.clear();
+        }
+        frame.uncachedDepth++;
+        frame.evaluatingAt.push(at);
+        try {
+            return body.get();
+        } finally {
+            frame.evaluatingAt.pop();
+            frame.uncachedDepth--;
+            if (outermost) {
+                frame.localMemo.clear();
+            }
+        }
+    }
+
+    /** The frame-local memo for an off-timeline evaluation. */
+    @SuppressWarnings("unchecked")
+    <T> T localMemo(Signal<T> signal, Supplier<T> compute) {
+        Map<Signal<?>, Object> memo = frames.get().localMemo;
+        if (memo.containsKey(signal)) {
+            return (T) memo.get(signal);
+        }
+        T value = compute.get();
+        memo.put(signal, value);
+        return value;
     }
 
     record Evaluation<T>(T value, Set<Signal<?>> dependencies) { }
@@ -89,12 +151,14 @@ final class Graph {
     /**
      * Something changed that contradicts what was predicted after {@code at}.
      *
-     * <p>Bumps the version, which retracts every cached value, and wakes the reactive effects. Strictly
-     * <em>after</em> {@code at}: a value already delivered for an earlier moment was correct when it was
-     * delivered, and rewriting history is neither possible nor desirable.
+     * <p>Bumps the version, which retracts every cached value, discards predictions later than
+     * {@code at}, and wakes the reactive effects. Strictly <em>after</em> {@code at}: a value already
+     * delivered for an earlier moment was correct when it was delivered, and rewriting history is
+     * neither possible nor desirable.
      */
     void invalidate(Moment at) {
         version++;
+        kron.discardPredictionsAfter(at);
         for (Effect effect : List.copyOf(reactive)) {
             effect.scheduleRerun(at);
         }
