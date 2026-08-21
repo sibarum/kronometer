@@ -158,6 +158,18 @@ public final class Kron implements AutoCloseable {
         return clock;
     }
 
+    /**
+     * Whether the calling thread is currently inside a shred.
+     *
+     * <p>The predicate an adapter needs. A GUI handler runs on a worker thread, so a library sitting
+     * between the two has to ask before deciding whether to act now or {@link #post} — and making every
+     * such caller reach for a package-private detail, or catch {@link Failures.NotOnTimeline} as control
+     * flow, would be worse than answering the question.
+     */
+    public boolean isOnTimeline() {
+        return CURRENT.isBound();
+    }
+
     /** The current logical moment. */
     public Moment now() {
         return now;
