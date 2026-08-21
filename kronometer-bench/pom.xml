@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>sibarum.kronometer</groupId>
+        <artifactId>kronometer</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>kronometer-bench</artifactId>
+
+    <name>Kronometer :: bench</name>
+    <description>Measurement harnesses. Deliberately free of JMH — so the same classes run unchanged
+        on the JVM and under GraalVM native-image, which is the comparison that decides the kernel's
+        shape.</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>sibarum.kronometer</groupId>
+            <artifactId>kronometer-core</artifactId>
+        </dependency>
+    </dependencies>
+
+</project>
