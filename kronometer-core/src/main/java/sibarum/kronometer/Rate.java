@@ -283,6 +283,24 @@ public final class Rate {
         return driver;
     }
 
+    /**
+     * Stop running {@code handler}, leaving every other handler — and the domain itself — untouched.
+     *
+     * <p>The counterpart {@link #each} needed from the start. Without it the only way to stop a per-step
+     * handler was to cancel the shred {@code each} hands back, which is the domain's <em>one</em> driver,
+     * shared by every handler on it: stopping one thing stopped everything, including whatever registered
+     * later. A domain that outlives the handlers registered on it — a frame clock, which is the usual
+     * case — needs each handler to be individually removable, or it accumulates dead ones forever.
+     *
+     * <p>Safe to call from inside a step: {@code handlers} is copy-on-write, so the iteration in flight
+     * finishes against the list it started with and the removal takes effect from the next step.
+     *
+     * @return whether {@code handler} was registered
+     */
+    public boolean remove(Consumer<Step> handler) {
+        return handlers.remove(Objects.requireNonNull(handler, "handler"));
+    }
+
     // -------------------------------------------------------------- internals
 
     Trigger tick() {

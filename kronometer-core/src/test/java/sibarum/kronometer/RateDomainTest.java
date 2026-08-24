@@ -207,4 +207,45 @@ class RateDomainTest {
             assertThrows(IllegalStateException.class, () -> kron.dynamic().degrade(ms(10), ms(20)));
         }
     }
+
+    /**
+     * Cancelling one effect on a domain stops that effect and nothing else.
+     *
+     * <p>A domain outlives the handlers on it — a frame clock is registered once and runs for the life of
+     * the application, while animations come and go against it — so "stop sampling, I have arrived" has
+     * to be a per-handler operation. It used to cancel the shred {@link Rate#each} returns, which is the
+     * domain's single driver shared by every handler: the first arrival stopped the clock for everything,
+     * including everything registered afterwards.
+     *
+     * <p>The shape is what makes this worth a test of its own. One animation on a fresh domain works
+     * perfectly and cleans up perfectly; the damage is invisible until a <em>second</em> one is asked
+     * for, so a suite that exercises one of anything reports a clean bill of health.
+     */
+    @Test
+    @DisplayName("cancelling one effect leaves the domain, and every other effect on it, running")
+    void cancellingOneEffectDoesNotStopTheDomain() {
+        List<String> log = new ArrayList<>();
+        try (Kron kron = Kron.driven()) {
+            Rate frames = kron.dynamic("frames");
+            frames.each(step -> log.add("survivor"));
+            Effect arriving = kron.effect(frames, () -> log.add("arriving"));
+
+            kron.tick(ms(10).nanos());
+            kron.tick(ms(20).nanos());
+            arriving.cancel();
+            kron.tick(ms(30).nanos());
+
+            // Registered after the cancellation, on a domain that has to still be alive to serve it.
+            Effect later = kron.effect(frames, () -> log.add("later"));
+            kron.tick(ms(40).nanos());
+
+            assertEquals(2, log.stream().filter("arriving"::equals).count(),
+                    "the cancelled effect stops at its cancellation, and no later: " + log);
+            assertEquals(4, log.stream().filter("survivor"::equals).count(),
+                    "the handler that never asked to stop keeps running: " + log);
+            assertEquals(1, log.stream().filter("later"::equals).count(),
+                    "and a domain that has had an effect cancelled still takes a new one: " + log);
+            later.cancel();
+        }
+    }
 }

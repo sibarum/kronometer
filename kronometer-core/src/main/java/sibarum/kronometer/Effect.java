@@ -29,7 +29,7 @@ public final class Effect {
     private final boolean reactive;
 
     private Set<Signal<?>> dependencies = new LinkedHashSet<>();
-    private Shred shred;
+    private Runnable detach;
     private boolean rerunPending;
     private boolean cancelled;
     private long runs;
@@ -56,11 +56,24 @@ public final class Effect {
         return Set.copyOf(dependencies);
     }
 
+    /**
+     * Stop this effect. Idempotent, and scoped to <em>this</em> effect: cancelling one effect on a rate
+     * domain leaves every other handler on that domain running.
+     *
+     * <p>That scoping is the whole reason {@link #detach} exists rather than a bound {@link Shred}. A
+     * rate domain runs all its handlers on one shred — {@code Rate.each} says so, and returns the same
+     * one to every caller — so an effect that cancelled its shred would stop the domain itself, and with
+     * it every other effect, every bound signal, and every future effect anybody registers there. The
+     * failure is silent and it is delayed: the first animation on a domain works perfectly and cancels
+     * cleanly on arrival, and every animation after it is dead. Detaching the handler is the operation
+     * that was actually meant.
+     */
     public void cancel() {
         cancelled = true;
         graph.unregisterReactive(this);
-        if (shred != null) {
-            shred.cancel();
+        if (detach != null) {
+            detach.run();
+            detach = null;
         }
     }
 
@@ -101,7 +114,8 @@ public final class Effect {
         });
     }
 
-    void bindShred(Shred shred) {
-        this.shred = shred;
+    /** How to unregister this effect from wherever it was scheduled, run once by {@link #cancel}. */
+    void bindDetach(Runnable detach) {
+        this.detach = detach;
     }
 }

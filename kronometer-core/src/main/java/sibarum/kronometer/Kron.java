@@ -373,11 +373,18 @@ public final class Kron implements AutoCloseable {
     /**
      * An effect that runs once per step of {@code domain} — the right form for anything continuous,
      * since a value that varies with time changes at every moment and what you want is to sample it.
+     *
+     * <p>Cancelling the returned effect removes <em>its</em> handler from the domain and nothing else.
+     * It used to bind the shred {@link Rate#each} returns, which is the domain's single driver shared by
+     * every handler, so the first {@code cancel()} on a frame clock stopped the clock for everyone —
+     * invisibly, and only from the second animation onwards.
      */
     public Effect effect(Rate domain, Runnable body) {
         Objects.requireNonNull(domain, "domain");
         Effect effect = new Effect(this, "effect@" + domain.name(), body, false);
-        effect.bindShred(domain.each(step -> effect.run()));
+        java.util.function.Consumer<Step> handler = step -> effect.run();
+        domain.each(handler);
+        effect.bindDetach(() -> domain.remove(handler));
         return effect;
     }
 
