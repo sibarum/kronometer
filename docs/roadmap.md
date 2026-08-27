@@ -471,6 +471,16 @@ as generic as §13 claims.
 
 The tactroller scenario harness lands in the same phase, in whichever repo §15.4 resolves to.
 
+### In progress — the consumer's list is in
+
+[consumer-notes.md](consumer-notes.md) records what vexelray-gui found while adopting this: the seams
+held and no `kronometer-vexelray` module was wanted, so §13's claim survives. What it asks for is
+three things — an aggregate `nextDeadline()`/`isQuiescent()` on `Kron` (the only item that *blocks* a
+consumer feature rather than merely costing it code), the two endpoint properties `Tween.run` is
+missing, and off-timeline scheduling so `Animator` is reachable from a handler thread. It also raises
+one design question the answer to which is not obvious: supersession has two legitimate policies and
+`Animator.play` names only one.
+
 ---
 
 ## Open questions, with deadlines
