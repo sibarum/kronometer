@@ -415,6 +415,16 @@ public final class Kron implements AutoCloseable {
      * stopped working presents as a frozen UI with nothing in the log, which is precisely the mystery
      * {@link #whyBusy()} exists to prevent.
      *
+     * <h2>One listener, last wins</h2>
+     *
+     * There is a single slot, and a second call replaces the first without a word. That is the right
+     * shape — a wake is one nudge to one loop, and a list would invite two — but it means <b>a
+     * {@code Kron} must have exactly one call site for this in the whole application</b>. Two, and the
+     * loser is whichever ran first: a profiler, a debug harness or a second adapter installing its own
+     * leaves the real loop with nothing to wake it, and the symptom is a window that stops responding
+     * for reasons that appear to have nothing to do with the thing that was added. If a second party
+     * needs to observe wakes, give it the real listener to call rather than a slot of its own.
+     *
      * @see #isQuiescent()
      */
     public void onWork(Runnable listener) {
