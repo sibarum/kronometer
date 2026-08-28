@@ -40,6 +40,8 @@ public final class Animator {
 
     private final Kron kron;
     private final Map<Object, Shred> running = new HashMap<>();
+    /** Bumped every time a key changes hands, so a superseded play can tell that it has. */
+    private final Map<Object, Long> generation = new HashMap<>();
 
     public Animator(Kron kron) {
         this.kron = Objects.requireNonNull(kron, "kron");
@@ -65,6 +67,32 @@ public final class Animator {
      *
      * <p>For procedural motions. The cancellation is delivered on the timeline, so the outgoing motion
      * unwinds — its {@code finally} blocks run at this moment — before the replacement begins.
+     *
+     * <h2>Unwinding is one of two policies, and it is not always the right one</h2>
+     *
+     * Worth saying next to the method rather than leaving to be discovered, because the bug it causes
+     * only appears when a user is quick enough to produce two events inside one duration, and it erases
+     * itself on the way past.
+     *
+     * <table border="1">
+     * <caption>What a retrigger should do to the motion it displaces</caption>
+     * <tr><th>Policy</th><th>Right when</th><th>Example</th></tr>
+     * <tr><td><b>Unwind</b> the loser — what this method does</td>
+     *     <td>it owns a resource that must be released, or a state that must be restored</td>
+     *     <td>a shred holding a voice, a lock, a reservation</td></tr>
+     * <tr><td><b>Abandon</b> the loser — see {@link #claim}</td>
+     *     <td>its teardown would undo the winner, because both write the same slot</td>
+     *     <td>a one-shot decoration; anything whose cleanup is "put the shared thing back"</td></tr>
+     * </table>
+     *
+     * <p>Play a one-shot acknowledgement into a slot whose resting value is nothing — a sweep across a
+     * field that took a command, a ring around one that refused — and unwinding is exactly backwards:
+     * the loser's teardown clears the paint the winner just put down, and the flash erases itself
+     * part-way through.
+     *
+     * <p>There is no policy argument here, and the reason is worth stating: a {@link Motion} is
+     * ordinary consumer code, so nothing in this class can suppress its writes. Abandonment has to
+     * happen where the writing happens, which is what {@link #claim} is for.
      */
     public Shred play(Object key, Motion motion) {
         Objects.requireNonNull(key, "key");
@@ -75,8 +103,58 @@ public final class Animator {
         return shred;
     }
 
-    /** Cancel whatever is playing under {@code key}, if anything is. */
+    /**
+     * A single play's claim on {@code key}: true until something else plays or stops under it.
+     *
+     * <p>The abandon policy, in one line instead of an identity table. Take a claim at the top of a
+     * motion and gate everything it writes — samples and teardown alike — and a superseded play becomes
+     * a no-op rather than an eraser:
+     *
+     * <pre>{@code
+     * animator.play(slot, () -> {
+     *     Animator.Claim mine = animator.claim(slot);
+     *     Tween.ramp(frames, ms(200), Ease.OUT_CUBIC,
+     *             a -> mine.ifCurrent(() -> node.overlay(cue.at(a))),
+     *             () -> mine.ifCurrent(node::clear));       // the loser's cleanup: silent
+     * });
+     * }</pre>
+     *
+     * <p>The loser is still cancelled, so it stops sampling and its shred goes away. What changes is
+     * that its {@code finally} finds itself out of date and does nothing — which is the whole
+     * difference between abandoned and unwound.
+     *
+     * <p>Take the claim <em>inside</em> the motion. Taken outside, it is claimed before {@link #play}
+     * has superseded the previous holder, and it would be stale from the start.
+     */
+    public Claim claim(Object key) {
+        Objects.requireNonNull(key, "key");
+        long mine = generation.getOrDefault(key, 0L);
+        return () -> generation.getOrDefault(key, 0L) == mine;
+    }
+
+    /** One play's claim on a key. See {@link #claim}. */
+    @FunctionalInterface
+    public interface Claim {
+
+        /** Whether the play that took this claim is still the current one under its key. */
+        boolean isCurrent();
+
+        /** Run {@code body} only if this claim is still current. */
+        default void ifCurrent(Runnable body) {
+            if (isCurrent()) {
+                body.run();
+            }
+        }
+    }
+
+    /**
+     * Cancel whatever is playing under {@code key}, if anything is.
+     *
+     * <p>Invalidates any {@link #claim} on the key too — a stop with no replacement is still the end of
+     * that play's turn, and a teardown that reads its claim afterwards should find it stale.
+     */
     public void stop(Object key) {
+        generation.merge(key, 1L, Long::sum);
         Shred previous = running.remove(key);
         if (previous != null && previous.isAlive()) {
             previous.cancel();

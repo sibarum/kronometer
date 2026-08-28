@@ -25,6 +25,31 @@ import java.util.function.Supplier;
  * <p>That is a full step of latency, and it is the accepted price of smoothness — the same trade the
  * fixed-timestep-with-interpolation pattern has always made. A domain that would rather have the
  * latency than the smoothness should read the producing value directly.
+ *
+ * <h2>Meeting the lag for the first time, in a frame loop</h2>
+ *
+ * A host that owns its loop is choosing between two orderings inside {@link Kron#tick}, and the choice
+ * is load-bearing rather than stylistic. Say input arrives, a simulation reads it, and a render pass
+ * reads the simulation through a {@code Sampled}:
+ *
+ * <pre>{@code
+ * // Ordering A — input first, clock second. One frame from event to pixel.
+ * beforeFrame(() -> {
+ *     bridge.drain();          // this frame's events are on the bus
+ *     kron.tick(nanos);        // physics reads them, frames renders what physics just produced
+ * });
+ *
+ * // Ordering B — clock first, input second. Two frames, and it looks like lag.
+ * beforeFrame(() -> {
+ *     kron.tick(nanos);        // physics reads *last* frame's events
+ *     bridge.drain();          // this frame's arrive too late to have been simulated
+ * });
+ * }</pre>
+ *
+ * Ordering A is the one to want. Both are one step of interpolation lag from the {@code Sampled}; B
+ * adds a second frame on top, purely from the order two lines were written in. Registration order
+ * within a domain does the same job at finer grain — {@code Rate.each} runs handlers in the order they
+ * were added, which is why a bridge that drains registers before the effects that read it.
  */
 public final class Sampled<T> {
 

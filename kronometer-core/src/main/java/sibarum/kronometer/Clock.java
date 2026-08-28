@@ -69,6 +69,16 @@ public interface Clock {
     static Driven driven(Driven.Mode mode) {
         return new Driven(mode);
     }
+
+    /**
+     * Stepped externally, measuring elapsed time against a supplied wall.
+     *
+     * <p>The seam that makes {@link Kron#tick()} — the argument-less form, where the kernel keeps its
+     * own origin — testable without sleeping.
+     */
+    static Driven driven(Driven.Mode mode, Wall wall) {
+        return new Driven(mode, wall);
+    }
 }
 
 final class VirtualClock implements Clock {

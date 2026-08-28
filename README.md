@@ -75,8 +75,8 @@ for the next *H* milliseconds was computed before you blocked.
 > ahead of you is inaudible. 40 ms with one frame of lookahead drops two frames.
 
 `kron.slack()` is that number, so the budget is readable rather than folklore. Overrun it and the
-shortfall becomes **slip** — a buffer can't invent time. `offload(work)` is still there for genuinely
-unbounded I/O.
+shortfall becomes **slip** — a buffer can't invent time. (`offload(work)`, for work that is genuinely
+unbounded, is designed in [§architecture](docs/architecture.md) and not yet built.)
 
 ## Frame rate is plural
 
@@ -165,11 +165,46 @@ Under `Kron.virtual()` a run is **deterministic** — enforced, not hoped for: a
 nondeterministic must declare its logical arrival time or be rejected. A ten-minute Tactroller GUI
 scenario becomes a microsecond unit test whose `Trace` is the assertion target.
 
-`Kron.driven()` defaults to `INLINE`, which guarantees that `kron.tick(nanos)` **returns with the
-batch complete** — effects have run before the frame is submitted, nothing drawn out of phase with
-what was computed. It delivers that by handing the batch to a persistent virtual kernel thread and
-blocking, rather than by running on the caller: a render thread is a platform thread, and a platform
-kernel thread costs 10× per handoff ([why](docs/benchmarks/baton.md)).
+`Kron.driven()` defaults to `INLINE`, which guarantees that `kron.tick()` **returns with the batch
+complete** — effects have run before the frame is submitted, nothing drawn out of phase with what was
+computed. It delivers that by handing the batch to a persistent virtual kernel thread and blocking,
+rather than by running on the caller: a render thread is a platform thread, and a platform kernel
+thread costs 10× per handoff ([why](docs/benchmarks/baton.md)).
+
+## Adding it to an app
+
+Five lines, and only the last one is in the loop:
+
+```java
+try (Kron kron = Kron.driven()) {                       // stepped by your loop
+    Rate frames = kron.dynamic("frames");               // one step per tick
+    Cell<Double> lift = kron.bound(frames, "lift", 0.0, card::elevation);
+
+    app.run(() -> kron.tick());                         // once per presented frame
+}
+```
+
+`bound` creates a cell and lands its value on a setter every frame, so from then on you animate the
+cell and forget the setter exists. `kron.tick()` keeps its own origin — a `Moment` counts from the
+kernel's zero, not from the epoch, so handing it `System.nanoTime()` asks it to run everything since
+1970 and one `50 Hz` domain will spend twenty seconds doing exactly that. A single tick is bounded, so
+a breakpoint costs a forgiven gap rather than a replayed one.
+
+From an event handler, cross the baton first — `kron.onTimeline(work)` runs inline if you are already
+there and posts if you are not. And if your loop would rather sleep than redraw a still UI:
+
+```java
+kron.onWork(loop::nudge);                       // how the kernel ends your wait
+Dur budget = kron.sleepTimeout();               // how long you may wait — FOREVER only if wired
+```
+
+`sleepTimeout()` hands out an indefinite block **only** when a wake exists to end it, so the classic
+render-on-demand deadlock — window frozen, animation running perfectly on a kernel nobody is ticking —
+is unreachable rather than merely warned about. Unwired, it returns zero and you get today's
+unconditional redraw, which is wasteful and obvious instead of silent and mystifying.
+
+**[docs/adopting.md](docs/adopting.md)** has the rest: which clock, the three mistakes, testing without
+sleeps, and what to do when nothing moves.
 
 ## Slip: what happens when you lose
 
@@ -247,6 +282,13 @@ mvn install    # + install 1.0-SNAPSHOT into your local repo
 
 ## Status
 
-Design stage. [docs/architecture.md](docs/architecture.md) is the source of truth — the kernel, the
-ordering rules, the signal graph and horizon model, precomputation, rate domains, interpolation,
-diagnostics, and the open questions. No code yet.
+**M8 — first real consumer.** The kernel, the signal graph and horizons, precomputation, rate domains,
+nested tempos, the animation libraries and the Atchung bridge are built and tested; 192 tests across
+six modules. `offload()` and animated tempo scales are designed but not built.
+
+[docs/adopting.md](docs/adopting.md) is where to start if you are wiring this into an application.
+[docs/architecture.md](docs/architecture.md) is the source of truth for the design — the kernel, the
+ordering rules, the horizon model, precomputation, rate domains, interpolation, diagnostics, and the
+open questions. [docs/roadmap.md](docs/roadmap.md) records what each milestone actually found, and
+[docs/consumer-notes.md](docs/consumer-notes.md) is the first consumer's report from the other side of
+the seam.

@@ -14,6 +14,29 @@ package sibarum.kronometer.anim;
  * cubic Bézier solved numerically lands near its endpoints rather than on them. An animation that stops
  * at 0.999 of its target is a bug that shows up as a shadow that never quite settles, so the endpoints
  * are special-cased and there is a test that walks every constant in this class.
+ *
+ * <h2>A transition wants two curves, not one</h2>
+ *
+ * The most expensive thing to learn about easing, and it is invisible to a test, because a test checks
+ * the endpoints and the endpoints are perfect either way.
+ *
+ * <p>Run every property of a transition off one ease and it reads as a slideshow. The two kinds of
+ * property want opposite treatment:
+ *
+ * <ul>
+ *   <li><b>Opacity is linear.</b> It has no place to arrive at, and the eye reads it about as given —
+ *       so shaping it only makes it wrong somewhere in the middle.</li>
+ *   <li><b>Displacement is eased out.</b> Decelerating into a position is what reads as weight;
+ *       arriving at constant speed reads as a slide being switched off.</li>
+ * </ul>
+ *
+ * <p>Concretely, on why an eased fade is worse rather than merely different: {@link #OUT_CUBIC} is
+ * {@code 1 - (1 - 0.5)³ = 0.875} at the halfway point of its own duration. So an {@code OUT_CUBIC}
+ * fade does seven eighths of its visible work in the first half and spends the rest crawling through
+ * the last eighth, where nothing is perceptible. That does not read as a slow fade — it reads as a
+ * delay followed by a jump.
+ *
+ * <p>Two curves over one duration, then, and the duration is the thing they share.
  */
 @FunctionalInterface
 public interface Ease {

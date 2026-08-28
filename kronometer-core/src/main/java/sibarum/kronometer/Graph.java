@@ -49,6 +49,18 @@ final class Graph {
     private final List<Effect> reactive = new ArrayList<>();
 
     /**
+     * Every live effect, on a rate or on invalidation alike.
+     *
+     * <p>Separate from {@link #reactive}, which is about <em>rerun scheduling</em>. This one is about
+     * <em>quiescence</em>: {@link Kron#nextDeadline()} has to ask whether anything an effect reads is
+     * still varying, and an effect on a rate domain never re-runs on invalidation but is very much
+     * still watching. Copy-on-write because the host thread reads it between ticks while the kernel
+     * thread writes it.
+     */
+    private final java.util.concurrent.CopyOnWriteArrayList<Effect> live =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /**
      * One thread's evaluation state.
      *
      * <p>{@code uncached} marks a precompute evaluation, which must not write to any signal's shared
@@ -190,6 +202,20 @@ final class Graph {
 
     void unregisterReactive(Effect effect) {
         reactive.remove(effect);
+    }
+
+    /** Record a live effect, whichever way it is scheduled. */
+    void registerEffect(Effect effect) {
+        live.add(effect);
+    }
+
+    void forgetEffect(Effect effect) {
+        live.remove(effect);
+    }
+
+    /** Every live effect. For quiescence, which needs to know what is being watched. */
+    List<Effect> effects() {
+        return live;
     }
 
     /** The narrowest horizon among {@code sources} — the min, as §7.1 requires. */

@@ -57,6 +57,35 @@ public final class Effect {
     }
 
     /**
+     * The last moment at which anything this effect read is still changing — {@link Moment#ORIGIN} if
+     * nothing is, which is the identity for a maximum.
+     *
+     * <p>The per-effect half of {@link Kron#isQuiescent()}, and it has to answer for an effect that has
+     * <em>never run</em> as well. Such an effect has no recorded dependencies, so summing them would
+     * report nothing varying — and a host that went to sleep on that answer would strand the effect
+     * before its first run, which is exactly when it would have registered the dependencies that keep
+     * it awake. So a never-run effect is busy until it has run once: it owes a step and it must get it.
+     */
+    Moment varyingUntil() {
+        if (runs == 0) {
+            return Moment.FOREVER;
+        }
+        Moment latest = Moment.ORIGIN;
+        for (Signal<?> source : dependencies) {
+            Moment varying = source.varyingUntil();
+            if (varying.isAfter(latest)) {
+                latest = varying;
+            }
+        }
+        return latest;
+    }
+
+    /** Whether {@link #cancel} has been called. */
+    boolean isCancelled() {
+        return cancelled;
+    }
+
+    /**
      * Stop this effect. Idempotent, and scoped to <em>this</em> effect: cancelling one effect on a rate
      * domain leaves every other handler on that domain running.
      *
@@ -71,6 +100,7 @@ public final class Effect {
     public void cancel() {
         cancelled = true;
         graph.unregisterReactive(this);
+        graph.forgetEffect(this);
         if (detach != null) {
             detach.run();
             detach = null;

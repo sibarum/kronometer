@@ -481,6 +481,218 @@ missing, and off-timeline scheduling so `Animator` is reachable from a handler t
 one design question the answer to which is not obvious: supersession has two legitimate policies and
 `Animator.play` names only one.
 
+### Answered so far
+
+192 tests across six modules. §1, §2, §4 and the §6 documentation are in; §3's `Scheduled` handle and
+§5's `settle()` are not.
+
+| Note | Answer |
+|---|---|
+| §1 aggregate deadline | `Kron.nextDeadline()`, `isQuiescent()`, `whyBusy()`, and `Kron.onWork()` for the wake |
+| §2 ramp endpoints | `Tween.ramp` (metro, blocking) and `Tween.rampOn` (domain-sampled) |
+| §3 off-timeline helper | `Kron.onTimeline(Runnable)` — the `Scheduled`-shaped spork handle is **not** built |
+| §4 supersession | Both policies documented on `play`; `Animator.claim(key)` makes the abandon policy one line |
+| §5 reduced motion | Not built — see below |
+| §6 nice-to-haves | Easing guidance on `Ease`, the perceptual rule on `Interp`, the frame-ordering worked example on `Sampled`, `Rate.hasHandlers()` |
+
+**`slack()` had most of §1 already, and it was the varying half that was missing.** The aggregate over
+the timeline queue and every domain's next grid line was there since M2; what a host also needs is
+whether anything an effect *reads* is still in flight, and for that the graph had no registry — it kept
+a list of reactive effects only, because that list was about rerun scheduling. Rate-bound effects
+record their dependencies just the same and were simply not being kept. So `Graph` now holds every live
+effect, and a value mid-flight answers `now`: there is no discrete moment to name when the thing you
+are waiting for is a curve.
+
+**§1 was only half a feature, and the missing half was a hang.** `nextDeadline()` licenses a host to
+block indefinitely, and nothing in the kernel could end that block. Work arriving from off the timeline
+— a click starting an animation, a worker's `post`, a background load finishing — reached an inbox that
+a sleeping host was never going to look at, and the window stayed frozen until an unrelated event
+happened along, with the animation running perfectly the whole time on a kernel nobody was ticking. The
+symptom is unattributable to anything in the graph, which is where anyone would look. `Kron.onWork` is
+the callback that closes it, fired on the posting thread, on **every** external arrival rather than on
+the empty→non-empty transition: the transition test races the kernel's own drain, and the asymmetry is
+not close — a redundant wake costs one loop iteration, a missed one costs the window.
+
+**And the wake had nothing to fire on, because `running` is not the predicate anyone thought it was.**
+It is true only *during* a batch. Under a driven clock the kernel is idle between ticks, so every
+`post` from a worker took the "nobody else is contending, act inline" branch that exists for setup —
+never touching the inbox, so `onWork` fired zero times in the first test written against it. That
+branch was also, in the same breath, a data race: two workers between the same pair of ticks, or one
+worker against a tick that starts underneath it, mutating the timeline with no synchronisation at all.
+The honest question is *has the kernel ever started*, which is permanent once true, so `started` now
+answers it and the five external-arrival paths route through one `postExternal` helper rather than
+open-coding two wakes each. Two consequences worth naming, both of them the conservative direction:
+
+- **A declared moment posted from off the timeline is no longer visible to `nextDeadline()` until a
+  tick places it**, so the answer is `now` and the host spends one tick to learn the real one. Tracking
+  a minimum pending moment across the inbox would recover it and was not worth a second concurrent
+  field in the one part of this system whose selling point is that it has no concurrency story.
+- **`post(Moment, ...)` validates its moment in the caller's stack now**, because a deferred rejection
+  is one the caller never sees — it would have surfaced later as a failure attributed to whichever
+  batch happened to drain the inbox.
+
+**Then the same predicate turned out to be guarding the graph, and there the coin flip had teeth.**
+`requireOnTimeline` — which gates `Cell.set`, `Cell.drive`, `Cell.follow`, `Trigger.fire`,
+`Tempo.rescale` and the Atchung bridge — was also asking whether a batch was running *right now*. So
+one call from one GUI handler was **refused when it happened to land inside a tick and silently raced
+the timeline when it landed between two**: an intermittent `NotOnTimeline` under load, or an
+unsynchronised write to a `PriorityQueue`, from the same line of consumer code, decided by timing. This
+is the shape of bug that costs a day, and it cost nothing to have — the safe cases are structural, not
+temporal, and there are exactly three of them:
+
+1. inside a shred — the baton is held;
+2. before the kernel has ever started — setup, nothing to contend with;
+3. **the host's own loop thread, between `INLINE` ticks** — it is the only thread that starts batches,
+   so while it is executing there none is running and none can begin.
+
+Case 3 is why `bridge.drain()` and a bare `lift.set(...)` still work from a frame loop, and it is
+excluded under `HANDOFF`, where a batch genuinely may be in flight between ticks — the race that mode
+trades away for latency is the reason it cannot have the concession. The host thread is *learned* from
+whoever calls `tick()` rather than declared, so there is nothing to register and nothing to get wrong.
+Everything else is a worker and is refused on the first call, every run, with `onTimeline` named in the
+message. `mayActInline()` is now the single answer for all seven call sites — five routing decisions
+and two guards — where there were three disagreeing predicates before.
+
+Case 3 also gives back the precision that `started` had cost: a post from the ticking thread is placed
+immediately, so `nextDeadline()` stays exact for it, and only worker posts pay the one-tick deferral.
+
+**`sleepTimeout()` exists because the two-call form was the trap.** `isQuiescent()` and
+`nextDeadline()` are both honest and composing them by hand is where a missing `onWork` hides, so there
+is now one call that answers the whole render-on-demand condition — and it returns `Dur.FOREVER`
+**only** when a wake listener is wired. Unwired, it returns `Dur.ZERO`: the loop redraws unconditionally
+exactly as it did before anyone asked. Making the dangerous answer unobtainable is worth more than
+documenting it, because the failure it prevents is silent, remote from its cause, and looks like a
+healthy graph. `isQuiescent()` keeps its plain meaning for tests and assertions.
+
+**A fixed domain that lost its last handler was waking forever.** `Rate.remove()` unregistered the
+handler and left the driver looping on its grid, running nothing. Under a paced clock that was
+invisible waste; under a driven one it is fatal to the whole feature, because *the driver's own
+timeline entry* is what a host would be told to wake for — filtering the domain out of the deadline
+calculation would not have helped. A handler-less driver now parks on a trigger, off the timeline, and
+`each()` wakes it through the inbox the way `requestCancel` already did. On resume it rebases to the
+grid index at-or-before now, so it neither replays the doze nor reports it as a skip, and it comes back
+on its **original grid phase** rather than a fresh one — a rebased phase would have quietly broken
+cross-domain interpolation for everything sampling it.
+
+**There is no supersession policy enum, and that is the finding rather than a shortcut.** A `Motion` is
+ordinary consumer code, so nothing in `Animator` can suppress its writes; the loser's teardown is the
+problem and the loser's teardown is not ours. Abandonment has to happen where the writing happens. So
+`play` keeps unwinding, both policies are named in its javadoc with the case each is right for, and
+`claim(key)` supplies the generation check the consumer had built by hand as an identity table —
+`mine.ifCurrent(...)` around the samples and around the teardown, and a superseded cue stops erasing
+the one that replaced it.
+
+**`Tween.run(Rate, ...)` never worked on a dynamic domain**, and would not have worked for the caller
+most likely to try it. `Rate.period()` is null there, so it failed with a `NullPointerException` out of
+`Metro`. It now says what is wrong and what to reach for instead — a metro-driven tween samples on a
+grid of its own making, which is not the grid of the frames it is animating.
+
+### Adoption — what the first hour costs, measured rather than guessed
+
+The consumer's list is what a working integration wanted. This is what it took to *get* one, found by
+walking the path rather than reading it, and the headline is not sugar.
+
+**`tick(long)` took a moment on Kronometer's timeline and nothing said so.** The obvious first guess is
+`kron.tick(System.nanoTime())`, which asks the kernel to run every scheduled moment since the epoch.
+Measured with one `fixed(ms(20))` domain: 17 million steps, about twenty seconds of frozen render
+thread, on the first frame, with no error and nothing in the log. `Kron.tick()` now keeps its own
+origin and is the form to reach for.
+
+**Nothing bounded a single tick, and `Rate.maxCatchUp` could not.** A domain never notices a long gap —
+it walks it one grid line at a time, always exactly on schedule, and so is never *behind* for the
+catch-up clamp to catch. The bound has to be at the kernel, so `Driven.maxAdvance(Dur)` caps how far one
+tick carries logical time (one second by default) and **forgives** the excess, reported as a `SKIPPED`
+overrun. That means `Driven` carries slip after all: the design said it did not because the host paces
+it, and a host at a breakpoint or on a laptop resuming from sleep is not pacing anything. Nobody wants
+twenty seconds of simulation replayed into a window that was not being looked at. `maxAdvance(FOREVER)`
+opts out, which is right for a scripted capture harness and never right for a render loop.
+
+**A backwards tick was silent.** Ticking `16, 32, 20, 48` produced frames at `16, 32, 32, 48` — a
+duplicate at the same moment with a `dt` of zero, which is a division waiting to happen in anybody's
+integrator. It throws now. Equal ticks stay legal, and are load-bearing: a headless harness settles a
+deferred completion by ticking the same value twice.
+
+**`onTimeline` has to run the work *inside a shred*, not merely somewhere the graph may be mutated.**
+The first cut ran it inline when the kernel was not running, on the grounds that `requireOnTimeline`
+permits that before `run()`. It does — and the body then dies on the first `Time.spork`, which is the
+whole reason anyone crosses the baton. Found by building the consumer's adapter against it, which is
+the argument for having done that.
+
+**An effect that has never run reports no dependencies**, so quiescence called it idle — and a host
+sleeping on that answer would strand the effect before the first run that would have registered the
+dependencies keeping it awake. A never-run effect is busy until it has run once.
+
+The rest is small: `Kron.bind`/`bound` for the most-copied wiring in the system, `Kron.ticks()` and a
+real `toString()` so *is my clock being driven at all* is answerable, and
+[adopting.md](adopting.md) for the six lines and the three mistakes.
+
+**`Tween.ramp` as first built did not replace what the consumer had.** Their ramp samples per *frame*;
+a metro-driven tween samples on a grid of its own making, which on a display is the wrong grid.
+`Tween.rampOn` is the domain-sampled form with the same two endpoint guarantees, and it drives a `Cell`
+so the ramp stays precomputable. With it, `KronoGui.ramp` is four lines instead of forty, and the only
+thing left in it is that `Sink` takes a float and `DoubleConsumer` a double.
+
+### Still open from the consumer's list
+
+- **§3's off-timeline spork handle.** `onTimeline` is in and it is the most-copied four lines, but the
+  `Scheduled`-shaped handle is not, and neither is making `Animator.play`/`retarget` callable from a
+  handler thread. `Animator.running` is a plain `HashMap` and the note is right that the posting has to
+  move outside the map rather than around it — worth deciding deliberately rather than discovering.
+- **§5 `settle()`.** Bigger than the note assumes: `Kron` does not retain the cells it creates, so there
+  is no registry of driven cells to walk. Reaching them through effect dependency sets would work and is
+  arguably the right semantics — a cell nothing reads does not need settling for the loop to go quiet —
+  but procedural tweens are shreds, and "complete rather than cancelled" for a shred parked in a `Metro`
+  loop is a new kernel operation, not a tempo trick. Its own milestone.
+- **`Topic` driving a `Cell` at `horizon == now`** is still reported untested by the consumer rather
+  than working, and nothing here changes that.
+
+### Designed, not built — the frame rate the graph asks for
+
+With `onWork` in, render-on-demand answers *whether* to draw. It does not answer *how often*, and that
+is the next question rather than the same one: `nextDeadline()` collapses to `now` the instant anything
+an effect reads is varying, so "something is animating" means "redraw flat out". A slow crossfade and a
+pointer-tracking drag are not the same request and are currently indistinguishable.
+
+**Why it cannot be derived.** An ease is smooth and a step function is not, and both are pure functions
+of time with identical horizons. Nothing in the graph distinguishes them, so the density a motion wants
+has to be *declared*. That is the whole reason this is a design entry and not a patch.
+
+**The shape, decided.** A ceiling is a preference with a default, not a per-animation obligation:
+
+```java
+Rate frames = kron.dynamic("frames").atMost(hz(60));      // the app's setting, once
+lift.drive(Curve.ramp(0, 1, ms(200)).atMost(Fps.VSYNC));  // this one wants everything
+```
+
+The domain-level ceiling is the app's configured max-FPS or vsync preference and is what almost every
+motion should inherit. `atMost` on a motion overrides it in either direction, `VSYNC` being the name for
+*whatever the display gives* rather than a number. Nobody should have to state a rate to animate
+something.
+
+Four properties to get right, three of which are easy to get backwards:
+
+1. **Ceilings compose by maximum.** Two motions in flight, one asking 30 Hz and one asking vsync, must
+   produce vsync — the loop has to satisfy the most demanding thing on screen. This is the opposite of
+   how `horizon()` composes, and the same direction as `varyingUntil()`. A third number in that family,
+   propagating the same way as the one it sits next to.
+2. **It is reported, not enforced.** A dynamic domain is tick-driven and the host owns its loop, so a
+   ceiling cannot change when a tick arrives. What it changes is what `nextDeadline()` *says*: with a
+   30 Hz ceiling over a varying value the answer becomes `now + 33ms` instead of `now`, and the host
+   sleeps of its own accord. That is why this is small — it is one term in an existing minimum, and
+   `onWork` already handles the interruption.
+3. **Nothing is quantised.** A capped motion is still sampled exactly at whatever moments it is sampled
+   at; it is not snapped to a grid. Values stay functions of time, which is the property everything
+   else here rests on.
+4. **Dynamic domains only.** A ceiling on a fixed grid would be a lie about `dt`. `degrade` is the
+   fixed-domain rate ladder and is explicitly not this: it is capacity pressure downwards, not a stated
+   preference, and it already rejects dynamic domains.
+
+**Decided: `atMost` hangs off the `Curve`, not the `Cell`.** A ceiling has to expire when the motion
+does. On the cell it would outlive the motion and silently apply to the next one — the same cell
+carrying a slow fade and then a pointer drag would cap the drag at the fade's rate, which is a
+frame-rate bug with no visible cause and nothing in the graph to point at. On the curve it is scoped to
+the thing that asked for it, and it reads in one line at the call site.
+
 ---
 
 ## Open questions, with deadlines

@@ -64,6 +64,8 @@ public final class Rate {
     private final String name;
     private final Kind kind;
     private final Trigger tick;
+    /** Fired when a handler is registered on a domain whose driver has parked for want of one. */
+    private final Trigger resumed;
 
     private Dur period;
     private int priority;
@@ -82,6 +84,7 @@ public final class Rate {
     private int overCount;
     private int underCount;
     private boolean started;
+    private volatile boolean idle;
     private Shred driver;
     private final java.util.concurrent.CopyOnWriteArrayList<Consumer<Step>> handlers =
             new java.util.concurrent.CopyOnWriteArrayList<>();
@@ -97,6 +100,7 @@ public final class Rate {
         this.period = period;
         this.tempo = tempo;
         this.tick = new Trigger(kron, name + ".tick");
+        this.resumed = new Trigger(kron, name + ".resumed");
     }
 
     // ---------------------------------------------------------- configuration
@@ -173,6 +177,11 @@ public final class Rate {
 
     public String name() {
         return name;
+    }
+
+    /** The runtime this domain belongs to. */
+    public Kron kron() {
+        return kron;
     }
 
     public Kind kind() {
@@ -255,6 +264,7 @@ public final class Rate {
         Objects.requireNonNull(handler, "handler");
         handlers.add(handler);
         if (started) {
+            kron.wakeDomain(this);
             return driver;
         }
         started = true;
@@ -263,6 +273,9 @@ public final class Rate {
             lastStep = Time.now();
             kron.predictor().fill(this, predictions);       // so the first step is a hit, not a miss
             while (true) {
+                if (handlers.isEmpty()) {
+                    park();
+                }
                 Step step = kind == Kind.FIXED ? nextFixed() : nextDynamic();
                 // Feed this moment's buffered values into the memo *before* the handler runs, so an
                 // effect reading get() is served an index lookup and cannot tell prediction happened.
@@ -295,10 +308,44 @@ public final class Rate {
      * <p>Safe to call from inside a step: {@code handlers} is copy-on-write, so the iteration in flight
      * finishes against the list it started with and the removal takes effect from the next step.
      *
+     * <p>Removing the <em>last</em> handler parks the driver — see {@link #hasHandlers()}. It parks at
+     * the top of the following step, not immediately, so a domain that has just lost its last handler
+     * wakes once more and runs nothing. One wasted wake is the conservative direction, and it keeps
+     * removal free of any need to reach into a shred that may be mid-segment.
+     *
      * @return whether {@code handler} was registered
      */
     public boolean remove(Consumer<Step> handler) {
         return handlers.remove(Objects.requireNonNull(handler, "handler"));
+    }
+
+    /**
+     * Whether anything is registered on this domain — the difference between "idle" and "being stepped
+     * for nothing".
+     *
+     * <p>It is the second of those this exists to abolish. A domain outlives the handlers registered on
+     * it (a frame clock is the usual case), and until M8 a fixed domain that had lost every handler
+     * carried on waking on its grid forever, running nothing: invisible waste under a paced clock, and
+     * fatal to {@link Kron#isQuiescent()} under a driven one, because the driver's own timeline entry
+     * is what a host would have been asked to wake for.
+     *
+     * <p>So a driver with no handlers now parks, off the timeline, until {@link #each} registers one
+     * again. A fixed domain rebases on resume — it owes nothing for the time it slept, and it comes
+     * back on its original grid phase rather than on a fresh one, so cross-domain interpolation is
+     * undisturbed.
+     */
+    public boolean hasHandlers() {
+        return !handlers.isEmpty();
+    }
+
+    /** How many handlers are registered. */
+    public int handlerCount() {
+        return handlers.size();
+    }
+
+    /** Whether the driver is parked for want of a handler. */
+    public boolean isIdle() {
+        return idle;
     }
 
     // -------------------------------------------------------------- internals
@@ -307,12 +354,51 @@ public final class Rate {
         return tick;
     }
 
-    /** The next moment this domain intends to be woken, for {@link Kron#slack()}. */
+    /**
+     * The next moment this domain intends to be woken, for {@link Kron#slack()} and
+     * {@link Kron#nextDeadline()}.
+     *
+     * <p>A domain with no handlers intends to be woken never — it is parked, and nothing will wake it
+     * but a registration.
+     */
     long nextGridLineNanos() {
-        if (kind != Kind.FIXED || originLocal == null) {
+        if (kind != Kind.FIXED || originLocal == null || handlers.isEmpty() || idle) {
             return Long.MAX_VALUE;              // a dynamic domain cannot know; nor can an unstarted one
         }
         return gridLine(index + 1).nanos();
+    }
+
+    /**
+     * Park the driver off the timeline until a handler is registered.
+     *
+     * <p>On a trigger rather than at a moment, because a moment is precisely what this must not
+     * occupy: an entry on the timeline is a deadline, and a domain with nothing to run does not have
+     * one.
+     */
+    private void park() {
+        idle = true;
+        try {
+            Time.await(resumed);
+        } finally {
+            idle = false;
+        }
+        if (kind == Kind.FIXED) {
+            // Owe nothing for the time spent parked. Landing on the grid index at-or-before now leaves
+            // `nextFixed` with zero lines behind, so it neither replays a sleep nor reports it as a
+            // skip — and because the index is measured against the *original* origin, the phase of the
+            // grid is the one every other domain was interpolating against.
+            index = gridIndexAtOrBefore(Time.now());
+            replayRemaining = 0;
+        } else {
+            lastStep = Time.now();              // dt measures from the resume, not across the doze
+        }
+    }
+
+    /** Wake a parked driver. Called on the kernel thread by {@link Kron#wakeDomain}. */
+    void resumeIfIdle() {
+        if (idle) {
+            resumed.wakeAll();
+        }
     }
 
     /**

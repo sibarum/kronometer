@@ -117,9 +117,32 @@ public final class Kron implements AutoCloseable {
     private volatile boolean kernelStopping;
     private volatile boolean stopRequested;
     private volatile boolean running;
+    /**
+     * Whether a batch has ever been requested — {@code true} for the rest of this runtime's life.
+     *
+     * <p>Distinct from {@link #running}, which is only true <em>during</em> a batch. Both answer "may
+     * the calling thread touch kernel state directly", and only this one answers it correctly for a
+     * driven clock, where the kernel is idle between ticks and yet a tick may begin at any moment.
+     */
+    private volatile boolean started;
+    /**
+     * Whoever last called {@link #tick} — the host's loop thread, learned rather than declared.
+     *
+     * <p>Outside a shred there is exactly one thread that may still touch kernel state safely, and it
+     * is this one, between {@code INLINE} ticks: it is the only thread that starts batches, so while it
+     * is here no batch is running and none can begin. Every other thread must cross the baton. Knowing
+     * which is which is what turns "sometimes throws, sometimes corrupts the timeline" into one
+     * consistent answer per caller.
+     */
+    private volatile Thread hostThread;
     private volatile long nextDeadlineNanos = Long.MAX_VALUE;
+    /** The unset {@link #workListener}, held by identity so {@link #toString} can say it is unset. */
+    private static final Runnable NO_WAKE = () -> { };
+    /** Kernel to host: something arrived while you were asleep. See {@link #onWork}. */
+    private volatile Runnable workListener = NO_WAKE;
 
     private long seq;
+    private long ticks;
     private long nextShredId;
     private Moment now = Moment.ORIGIN;
     private Trace trace;
@@ -170,6 +193,40 @@ public final class Kron implements AutoCloseable {
         return CURRENT.isBound();
     }
 
+    /**
+     * Run {@code work} on the timeline: now if the caller is already there, otherwise at the next
+     * moment the kernel observes.
+     *
+     * <p>Four lines that every adapter was going to write, and the shape they were going to write it
+     * in. A GUI event handler runs on a worker, so anything it wants to do to the graph — start a
+     * tween, retarget a cell, spork a shred — has to cross the baton first, and {@link #isOnTimeline()}
+     * on its own leaves the caller holding both branches.
+     *
+     * <p>What it guarantees is that {@code work} runs <b>inside a shred</b>, not merely somewhere the
+     * graph may be mutated. That distinction is the whole value: the reason to cross the baton is
+     * usually to call {@link Time#spork}, {@link Time#advance} or something built on them, and those
+     * need a current shred rather than an absence of contention. Running the body on the caller's
+     * thread during setup would satisfy {@link #requireOnTimeline} and still fail on the first time
+     * intrinsic — so off the timeline this always posts, before {@link #run()} as much as after it.
+     *
+     * @throws IllegalStateException from off the timeline under the {@linkplain Clock#virtual()
+     *         virtual} clock while it is running, for the reason {@link #post(Runnable)} gives: an
+     *         external thread's arrival time is not a reproducible input
+     */
+    public void onTimeline(Runnable work) {
+        Objects.requireNonNull(work, "work");
+        if (CURRENT.isBound()) {
+            work.run();
+        } else if (mayActInline()) {
+            // Setup, or the host's own loop thread between ticks: nothing is contending, so place it
+            // directly. It still runs as a shred, at the first moment the kernel observes, which is
+            // what the time intrinsics need.
+            sporkAt(now, Detach.YES, "onTimeline", work);
+        } else {
+            post(work);
+        }
+    }
+
     /** The current logical moment. */
     public Moment now() {
         return now;
@@ -206,6 +263,193 @@ public final class Kron implements AutoCloseable {
             next = Math.min(next, domain.nextGridLineNanos());
         }
         return next == Long.MAX_VALUE ? Dur.FOREVER : clock.slackUntil(next);
+    }
+
+    /**
+     * The earliest moment at which this runtime has anything to do — {@link Moment#FOREVER} if it has
+     * nothing to do at all.
+     *
+     * <p>What a host that owns its own wait needs, and the one thing it cannot work out for itself. A
+     * render-on-demand loop blocks in {@code waitEvents(timeout)} and wakes on input; the timeout is
+     * this. {@link Signal#varyingUntil()} answers the same question for one signal, but a loop needs
+     * the aggregate, and only the kernel holds all three parts of it:
+     *
+     * <ul>
+     *   <li>the next entry on the timeline — a sleeping shred, a posted task;</li>
+     *   <li>the next grid line of every {@link Rate} that still has handlers on it;</li>
+     *   <li>whether anything an {@link Effect} reads is still <em>varying</em>, in which case the
+     *       answer is {@code now}: a value mid-flight wants the next frame that can be drawn, and
+     *       there is no discrete moment to name;</li>
+     *   <li>whether anything is waiting in the inbox, which is also {@code now} — work from a
+     *       <em>worker</em> thread is not placed until a tick looks at it, so however precisely its
+     *       caller declared a moment, that moment is not yet knowable from here. Costs the host one
+     *       tick, after which the answer is exact; posts from the thread that ticks are placed at once
+     *       and never pay it. {@link #onWork} is how a sleeping host learns to take that tick.</li>
+     * </ul>
+     *
+     * <h2>Advisory, and deliberately conservative</h2>
+     *
+     * Under a {@linkplain Clock#driven() driven} clock the host supplies the ticks, so this is not a
+     * promise that the kernel will run then — it is the kernel saying <em>there is no point ticking me
+     * before this</em>. It may be too early, and an answer that is too early costs one wasted frame.
+     * It is never too late, which is the property a loop is entitled to rely on: anything the kernel
+     * cannot see inside — a raw {@link Rate#each} handler, a {@link Sampled} read outside an effect —
+     * is on a domain whose grid line is reported regardless.
+     *
+     * <h2>When to ask</h2>
+     *
+     * From the timeline, or from the host thread once {@link #tick} has returned in
+     * {@link Driven.Mode#INLINE} — that return is what publishes the kernel's writes to the caller. In
+     * {@link Driven.Mode#HANDOFF} a batch may still be in flight, and the answer is then a reading of
+     * whenever the kernel last got to.
+     *
+     * @see #isQuiescent()
+     */
+    public Moment nextDeadline() {
+        // Something arrived from outside and has not been placed on the timeline yet. It will be, at
+        // the next moment the kernel observes, so the next moment is due.
+        if (!inbox.isEmpty()) {
+            return now;
+        }
+        for (Effect effect : graph.effects()) {
+            if (effect.varyingUntil().isAfter(now)) {
+                return now;
+            }
+        }
+        long next = nextDeadlineNanos;
+        for (Rate domain : domains) {
+            next = Math.min(next, domain.nextGridLineNanos());
+        }
+        return next == Long.MAX_VALUE ? Moment.FOREVER : new Moment(next);
+    }
+
+    /**
+     * Whether nothing is scheduled and nothing is varying, so a host may sleep indefinitely.
+     *
+     * <p>Exactly {@code nextDeadline().equals(Moment.FOREVER)}, and named separately because that is
+     * the question a loop actually asks — {@code animating ? nextDeadline() : never} is the whole
+     * condition of a render-on-demand loop, and writing the sentinel comparison at every call site
+     * would be worse than answering it here.
+     *
+     * <p>Conservative in the same direction: a runtime that is quiescent is certainly idle, and a
+     * runtime that is <em>not</em> may still have nothing visible to do. "Why is my loop never idle"
+     * is answered by {@link #whyBusy()}.
+     */
+    public boolean isQuiescent() {
+        return nextDeadline().equals(Moment.FOREVER);
+    }
+
+    /**
+     * Why this runtime is not quiescent, in one line per reason — empty when it is.
+     *
+     * <p>The diagnostic sibling of {@link #isQuiescent()}, and the reason it exists is that a
+     * never-quiescent kernel is otherwise a mystery: the loop spins, the answer is always {@code now},
+     * and nothing says which of a hundred effects or domains is asking for it. Cost is proportional to
+     * the number of effects and domains, so this is for a log line and a breakpoint, not for a frame.
+     */
+    public List<String> whyBusy() {
+        List<String> reasons = new java.util.ArrayList<>();
+        if (!inbox.isEmpty()) {
+            reasons.add("inbox: work posted from off the timeline, not yet placed");
+        }
+        for (Effect effect : graph.effects()) {
+            Moment varying = effect.varyingUntil();
+            if (varying.isAfter(now)) {
+                reasons.add(effect.name() + ": reads something varying until "
+                        + (varying.equals(Moment.FOREVER) ? "forever" : varying.toString()));
+            }
+        }
+        if (nextDeadlineNanos != Long.MAX_VALUE) {
+            reasons.add("timeline: next entry at " + new Moment(nextDeadlineNanos));
+        }
+        for (Rate domain : domains) {
+            long line = domain.nextGridLineNanos();
+            if (line != Long.MAX_VALUE) {
+                reasons.add(domain.name() + ": " + domain.handlerCount()
+                        + " handler(s), next grid line at " + new Moment(line));
+            }
+        }
+        return List.copyOf(reasons);
+    }
+
+    /**
+     * How the kernel wakes a host that went to sleep on {@link #isQuiescent()}.
+     *
+     * <p>The other half of render-on-demand, and the half that is a hang rather than a cost when it is
+     * missing. {@link #nextDeadline()} tells a host it may block indefinitely; from that instant the
+     * only two things that can end the sleep are the host's own event source and this. So a worker
+     * thread calling {@link #onTimeline} — a click starting an animation, a network reply landing, a
+     * background load finishing — reaches an inbox nobody is going to look at, and the window stays
+     * frozen until some unrelated keystroke happens along. The kernel can see perfectly well that it
+     * has work for a sleeping host. Without this it has no way to say so.
+     *
+     * <pre>{@code
+     * kron.onWork(GLFW::glfwPostEmptyEvent);       // wired once, at startup
+     * }</pre>
+     *
+     * <h2>What it fires on</h2>
+     *
+     * Work arriving from <em>off</em> the timeline, which is the only kind a sleeping host can miss:
+     * {@link #post}, {@link #onTimeline} from a worker, a cancellation, a {@link Rate#each}
+     * registration that restarts a parked domain. Work the timeline schedules for itself needs no wake
+     * — in {@link Driven.Mode#INLINE} {@code tick()} returns with the batch complete and the host asks
+     * {@link #nextDeadline()} after that return, so it is already in the answer.
+     *
+     * <p>It fires on <em>every</em> such arrival, not only on the one that finds the inbox empty. The
+     * transition test is the obvious optimisation and it is a race against the kernel's own drain;
+     * this is the same conservative direction {@link Rate} takes with a wasted wake, and the asymmetry
+     * is sharper here — a redundant wake costs one loop iteration that finds nothing to do, and a
+     * missed one costs a window that never comes back.
+     *
+     * <h2>What the listener may do</h2>
+     *
+     * It runs on the <b>posting thread</b>, inline, before the post returns, and that thread is
+     * whatever the caller happened to be. So it must be safe from any thread, it must not block, and it
+     * must not call back into this {@code Kron} — posting from it recurses. Nudging an event loop is
+     * the entire intended body, and {@code glfwPostEmptyEvent} is documented as callable from any
+     * thread for exactly this purpose.
+     *
+     * <p>The work is placed on the inbox <em>before</em> the listener runs, so a listener that throws
+     * cannot lose it — only delay it until something else ticks. The failure surfaces through the
+     * kernel's usual channel rather than into the caller's post, because a wake path that has silently
+     * stopped working presents as a frozen UI with nothing in the log, which is precisely the mystery
+     * {@link #whyBusy()} exists to prevent.
+     *
+     * @see #isQuiescent()
+     */
+    public void onWork(Runnable listener) {
+        this.workListener = Objects.requireNonNull(listener, "listener");
+    }
+
+    /**
+     * How long a host may block before it should tick again — the whole render-on-demand condition, as
+     * one number. {@link Dur#FOREVER} means block until an event arrives.
+     *
+     * <pre>{@code
+     * Dur budget = kron.sleepTimeout();
+     * waitEvents(budget.equals(Dur.FOREVER) ? NO_TIMEOUT : budget.millis());
+     * }</pre>
+     *
+     * <p>Prefer this to composing {@link #isQuiescent()} and {@link #nextDeadline()} by hand, because
+     * <b>this is the only form that cannot deadlock</b>: it returns {@code FOREVER} only when
+     * {@link #onWork} has been wired, since an indefinite block with nothing able to end it is a frozen
+     * window. Unwired, the answer is {@link Dur#ZERO} — the loop keeps redrawing exactly as it did
+     * before it asked, which is wasteful and visibly fine, and {@code toString()} names the missing
+     * listener. Wasting a core is a bug you file; freezing is a bug you spend a day on.
+     *
+     * <p>Zero also comes back for the ordinary busy case — something is varying, so the next drawable
+     * frame is wanted — so a caller cannot distinguish "animating" from "not wired". That is
+     * deliberate: they call for the same action, and the diagnostic belongs in {@code toString()}
+     * rather than in a loop that runs sixty times a second.
+     *
+     * @see #onWork(Runnable)
+     */
+    public Dur sleepTimeout() {
+        Moment deadline = nextDeadline();
+        if (deadline.equals(Moment.FOREVER)) {
+            return workListener == NO_WAKE ? Dur.ZERO : Dur.FOREVER;
+        }
+        return deadline.isAfter(now) ? deadline.since(now) : Dur.ZERO;
     }
 
     /**
@@ -383,9 +627,44 @@ public final class Kron implements AutoCloseable {
         Objects.requireNonNull(domain, "domain");
         Effect effect = new Effect(this, "effect@" + domain.name(), body, false);
         java.util.function.Consumer<Step> handler = step -> effect.run();
+        graph.registerEffect(effect);
         domain.each(handler);
         effect.bindDetach(() -> domain.remove(handler));
         return effect;
+    }
+
+    /**
+     * Land {@code signal}'s value on {@code sink} once per step of {@code domain}.
+     *
+     * <p>Sugar over {@link #effect(Rate, Runnable)}, and it earns its place by being the single
+     * most-written line in every adapter — {@code effect(frames, () -> setter.accept(signal.get()))}
+     * is a lambda inside a lambda that names nothing.
+     *
+     * <p>The direction matters more than the brevity: the signal is the source of truth and the sink is
+     * only where it lands. That is the shape that stays precomputable — if the signal descends only
+     * from curves, this property's whole visible future can be evaluated ahead, off the frame thread,
+     * and the sink never knows.
+     *
+     * <p>Cancel the returned {@link Effect} to unbind. That detaches this handler alone, leaving the
+     * domain and every other binding on it running.
+     */
+    public <T> Effect bind(Rate domain, Signal<T> signal, Consumer<T> sink) {
+        Objects.requireNonNull(signal, "signal");
+        Objects.requireNonNull(sink, "sink");
+        return effect(domain, () -> sink.accept(signal.get()));
+    }
+
+    /**
+     * A cell whose value lands on {@code sink} once per step of {@code domain} — the usual way to start.
+     *
+     * <p>The two lines everybody writes first, in the order that makes the second one automatic: create
+     * the source of truth, say where it shows up, and from then on animate the cell and forget the
+     * sink exists.
+     */
+    public <T> Cell<T> bound(Rate domain, String name, T initial, Consumer<T> sink) {
+        Cell<T> cell = cell(name, initial);
+        bind(domain, cell, sink);
+        return cell;
     }
 
     /**
@@ -399,6 +678,7 @@ public final class Kron implements AutoCloseable {
     public Effect effect(String name, Runnable body) {
         Effect effect = new Effect(this, name, Objects.requireNonNull(body, "body"), true);
         graph.registerReactive(effect);
+        graph.registerEffect(effect);
         if (CURRENT.isBound()) {
             effect.run();
         } else {
@@ -468,22 +748,31 @@ public final class Kron implements AutoCloseable {
      */
     public Shred spork(Detach detach, String name, Runnable body) {
         Objects.requireNonNull(body, "body");
-        if (running && !CURRENT.isBound()) {
-            throw new Failures.NotOnTimeline(
-                    "spork() from off the timeline while the kernel is running; use post(at, ...)");
+        if (!mayActInline()) {
+            throw new Failures.NotOnTimeline("spork() from off the timeline while the kernel is "
+                    + "running; use kron.onTimeline(...) or post(at, ...)");
         }
         return sporkAt(now, detach, name, body);
     }
 
-    /** Run {@code task} on the timeline at {@code at}, as a one-shot detached shred. */
+    /**
+     * Run {@code task} on the timeline at {@code at}, as a one-shot detached shred.
+     *
+     * <p>A moment that has already passed is rejected <b>here</b>, in the caller's own stack, rather
+     * than wherever the task eventually lands. From off the timeline the placement is deferred to the
+     * kernel, and a deferred rejection is one the caller never sees: it would surface later as a
+     * failure attributed to a batch that merely happened to be the one draining the inbox.
+     *
+     * @throws IllegalArgumentException if {@code at} has already passed
+     */
     public void post(Moment at, Runnable task) {
         Objects.requireNonNull(at, "at");
         Objects.requireNonNull(task, "task");
-        if (CURRENT.isBound() || !running) {
+        requireNotPast(at);
+        if (mayActInline()) {
             postAt(at, task);
         } else {
-            inbox.add(() -> postAt(at, task));
-            idleGate.open();                    // the kernel may be parked waiting for exactly this
+            postExternal(() -> postAt(at, task));
         }
     }
 
@@ -500,11 +789,10 @@ public final class Kron implements AutoCloseable {
             throw new IllegalStateException("post(Runnable) has no reproducible arrival time under "
                     + "the virtual clock; use post(Moment, Runnable)");
         }
-        if (CURRENT.isBound() || !running) {
+        if (mayActInline()) {
             sporkAt(now, Detach.YES, "post", task);
         } else {
-            inbox.add(() -> sporkAt(now, Detach.YES, "post", task));
-            idleGate.open();
+            postExternal(() -> sporkAt(now, Detach.YES, "post", task));
         }
     }
 
@@ -550,18 +838,64 @@ public final class Kron implements AutoCloseable {
     }
 
     /**
-     * Step a {@linkplain Clock#driven() driven} clock: run the timeline up to {@code wallNanos}.
+     * Step a {@linkplain Clock#driven() driven} clock to <em>now</em>, keeping the origin itself.
+     *
+     * <p>The form to reach for when adding a clock to an application, and the reason it exists is that
+     * the other one has a trap in it. {@link #tick(long)} takes a moment on <b>Kronometer's</b>
+     * timeline, which starts at zero — not a wall-clock reading. The obvious first guess is
+     * {@code kron.tick(System.nanoTime())}, and that asks the kernel to run every scheduled moment
+     * between the epoch and now: measured, seventeen million steps of one 50 Hz domain, about twenty
+     * seconds of frozen render thread on the first frame, with no error and nothing in the log.
+     *
+     * <p>An origin is not a decision anybody wants to make, so this makes it for you: the first call
+     * takes a reading and every call after it ticks to the elapsed difference. Hand it straight to a
+     * frame loop.
+     *
+     * <pre>{@code
+     * try (Kron kron = Kron.driven()) {
+     *     Rate frames = kron.dynamic("frames");
+     *     kron.effect(frames, () -> node.x(shown.get()));
+     *     app.run(beforeFrame -> kron.tick());       // that is the whole wiring
+     * }
+     * }</pre>
+     */
+    public void tick() {
+        requireOpen();
+        tick(requireDriven().elapsedNanos());
+    }
+
+    /**
+     * Step a {@linkplain Clock#driven() driven} clock: run the timeline up to {@code elapsedNanos}.
      *
      * <p>In {@link Driven.Mode#INLINE} this returns with the batch complete, so effects have run
      * before the frame is submitted. In {@link Driven.Mode#HANDOFF} it signals and returns.
+     *
+     * <p>{@code elapsedNanos} is measured from <b>{@link Moment#ORIGIN}</b>, which is where this
+     * runtime's logical time starts — not from the epoch, and not from {@link System#nanoTime()}.
+     * A host that would rather not keep an origin should call {@link #tick()} instead.
+     *
+     * <p>Ticks must not go backwards, and one that does throws rather than being quietly absorbed: it
+     * used to produce a duplicate frame at the same moment, with a {@code dt} of zero, which is a
+     * division waiting to happen in anybody's integrator.
+     *
+     * <p>How far one tick may carry logical time is bounded — see {@link Driven#maxAdvance(Dur)} —
+     * so a breakpoint or a sleeping laptop costs a forgiven gap rather than a replayed one.
+     *
+     * @throws IllegalArgumentException if {@code elapsedNanos} is before the current moment
      */
-    public void tick(long wallNanos) {
+    public void tick(long elapsedNanos) {
         requireOpen();
-        if (!(clock instanceof Driven driven)) {
-            throw new IllegalStateException("tick() requires Clock.driven(), not " + clock);
+        Driven driven = requireDriven();
+        if (elapsedNanos < now.nanos()) {
+            throw new IllegalArgumentException(
+                    "tick(" + new Dur(elapsedNanos) + ") is before the current moment " + now
+                            + "; ticks are elapsed since Moment.ORIGIN and must not go backwards"
+                            + " — use tick() to have the kernel keep the origin");
         }
         boolean inline = driven.mode() == Driven.Mode.INLINE;
-        pump(null, new Moment(wallNanos), inline);
+        hostThread = Thread.currentThread();
+        ticks++;
+        pump(null, new Moment(driven.logicalFor(elapsedNanos, now.nanos())), inline);
         if (inline) {
             reportFailures();
         }
@@ -569,6 +903,18 @@ public final class Kron implements AutoCloseable {
 
     public void tick(Moment upTo) {
         tick(upTo.nanos());
+    }
+
+    /** How many times {@link #tick} has been called — the answer to "is my clock being driven at all". */
+    public long ticks() {
+        return ticks;
+    }
+
+    private Driven requireDriven() {
+        if (!(clock instanceof Driven driven)) {
+            throw new IllegalStateException("tick() requires Clock.driven(), not " + clock);
+        }
+        return driven;
     }
 
     /**
@@ -610,6 +956,10 @@ public final class Kron implements AutoCloseable {
      */
     private void pump(Runnable before, Moment limit, boolean wait) {
         ensureKernelThread();
+        // From here on nobody outside may touch kernel state directly, and that is permanent: under a
+        // driven clock the kernel is idle between ticks, which looks exactly like setup and is not —
+        // the next tick may begin at any moment, and a worker acting inline would race it.
+        started = true;
         long ticket;
         synchronized (batchLock) {
             batchBefore = before;
@@ -788,6 +1138,29 @@ public final class Kron implements AutoCloseable {
         return any;
     }
 
+    /**
+     * Place work that arrived from off the timeline, and wake both things that might be asleep on it.
+     *
+     * <p>Every path from outside the timeline into the kernel goes through here, and that is the whole
+     * point of it existing: there are two wakes to remember — the kernel parked on {@link #idleGate}
+     * under a paced clock, and the <em>host</em> parked on its own event queue under a driven one — and
+     * both were previously open-coded at each call site. Forgetting either produces a hang rather than
+     * a slowdown, and the second one was in fact missing everywhere, because nothing had ever needed
+     * it until a host started sleeping on {@link #isQuiescent()}.
+     *
+     * <p>Order matters: the work is queued before either wake, so no wake can arrive at a kernel that
+     * cannot yet see what it was woken for, and no listener failure can lose the work.
+     */
+    private void postExternal(Runnable task) {
+        inbox.add(task);
+        idleGate.open();                        // the kernel may be parked waiting for exactly this
+        try {
+            workListener.run();
+        } catch (Throwable t) {
+            failures.add(t);
+        }
+    }
+
     private void drainInbox() {
         Runnable task;
         while ((task = inbox.poll()) != null) {
@@ -839,10 +1212,21 @@ public final class Kron implements AutoCloseable {
     }
 
     private void postAt(Moment at, Runnable task) {
+        requireNotPast(at);
+        sporkAt(at, Detach.YES, "post", task);
+    }
+
+    /**
+     * Reject a moment that logical time has already gone past.
+     *
+     * <p>Checked twice on the deferred path, and deliberately: once at the API boundary so the caller
+     * gets the error, and again at placement because {@code now} may have moved in between — under a
+     * paced clock the interval between posting and draining is real time.
+     */
+    private void requireNotPast(Moment at) {
         if (at.isBefore(now)) {
             throw new IllegalArgumentException("moment " + at + " has already passed (now " + now + ")");
         }
-        sporkAt(at, Detach.YES, "post", task);
     }
 
     private void requireOpen() {
@@ -864,6 +1248,13 @@ public final class Kron implements AutoCloseable {
 
     void enqueue(Shred shred, Moment at, long suspensionId) {
         timeline.add(new Entry(at, shred.priority(), seq++, shred, suspensionId));
+        if (!running && at.nanos() < nextDeadlineNanos) {
+            // Placed between batches — during setup, or by a host thread posting between ticks. The
+            // kernel is not looping, so nothing else will notice this entry until it starts again, and
+            // a host asking nextDeadline() in the meantime would otherwise be told to sleep on it.
+            // While the kernel *is* running, loop() owns this field and derives it more precisely.
+            nextDeadlineNanos = at.nanos();
+        }
     }
 
     void traceEvent(Shred shred, Trace.Kind kind, String detail) {
@@ -884,11 +1275,25 @@ public final class Kron implements AutoCloseable {
     }
 
     void requestCancel(Shred shred) {
-        if (CURRENT.isBound() || !running) {
+        if (mayActInline()) {
             shred.requestCancel();
         } else {
-            inbox.add(shred::requestCancel);
-            idleGate.open();
+            postExternal(shred::requestCancel);
+        }
+    }
+
+    /**
+     * Restart a domain whose driver parked because it had no handlers left.
+     *
+     * <p>Same shape as {@link #requestCancel}, and for the same reason: the wake has to happen on the
+     * kernel thread, and a registration can arrive from anywhere. Going through the inbox rather than
+     * {@link #post(Runnable)} keeps it clock-agnostic — a virtual run registers handlers too.
+     */
+    void wakeDomain(Rate domain) {
+        if (mayActInline()) {
+            domain.resumeIfIdle();
+        } else {
+            postExternal(domain::resumeIfIdle);
         }
     }
 
@@ -903,9 +1308,76 @@ public final class Kron implements AutoCloseable {
     }
 
     void requireOnTimeline(String operation) {
-        if (running && !CURRENT.isBound()) {
-            throw new Failures.NotOnTimeline(
-                    operation + " must happen on the timeline, from inside a shred");
+        if (!mayActInline()) {
+            throw new Failures.NotOnTimeline(operation
+                    + " must happen on the timeline, from inside a shred"
+                    + " — wrap it in kron.onTimeline(...)" + (isHandoff()
+                            ? ", which HANDOFF requires even on the thread that ticks"
+                            : ""));
         }
+    }
+
+    /**
+     * Whether the calling thread may touch kernel state directly, rather than crossing the baton.
+     *
+     * <p>One predicate for every caller, because there used to be three and they disagreed. The old
+     * one asked whether a batch was <em>currently</em> running, which under a driven clock is false
+     * most of the time — so the same call from the same GUI handler was refused when it happened to
+     * land inside a tick and silently raced the timeline when it landed between two. Load-dependent,
+     * intermittent, and presenting either as a spurious {@code NotOnTimeline} or as a corrupted
+     * priority queue. Three cases are safe and they are all structural rather than temporal:
+     *
+     * <ol>
+     *   <li><b>Inside a shred.</b> The baton is held; that is what the baton is for.</li>
+     *   <li><b>Before the kernel has ever started.</b> Setup, with nothing to contend with.</li>
+     *   <li><b>The host's own loop thread, between {@code INLINE} ticks.</b> It is the only thread
+     *       that starts batches, so while it is executing here none is running and none can begin.
+     *       {@code HANDOFF} is excluded because a batch may still be in flight — which is exactly the
+     *       race the mode trades away for latency, and the reason it cannot have this concession.</li>
+     * </ol>
+     *
+     * <p>Anything else is a worker thread and is refused <em>every</em> time, which is the property
+     * that matters: a rule that holds only under load is not a rule, it is a coin flip you discover in
+     * production.
+     */
+    private boolean mayActInline() {
+        if (CURRENT.isBound() || !started) {
+            return true;
+        }
+        return !running && Thread.currentThread() == hostThread && !isHandoff();
+    }
+
+    private boolean isHandoff() {
+        return clock instanceof Driven driven && driven.mode() == Driven.Mode.HANDOFF;
+    }
+
+    /**
+     * Everything you want in the log line when an animation is not moving.
+     *
+     * <p>The first question is always whether the clock is being driven at all, and until this existed
+     * there was no way to ask it: a driven runtime that nobody ticks is indistinguishable from one with
+     * nothing to do. Ticks, {@code now} and the domains' handler counts answer it between them, and
+     * {@link #whyBusy()} answers the opposite question.
+     */
+    @Override
+    public String toString() {
+        StringBuilder out = new StringBuilder("Kron(").append(clock)
+                .append(", now ").append(now);
+        if (clock instanceof Driven) {
+            out.append(", ").append(ticks).append(" ticks");
+        }
+        out.append(", ").append(alive.size()).append(" shreds")
+                .append(", ").append(graph.effects().size()).append(" effects");
+        for (Rate domain : domains) {
+            out.append(", ").append(domain.name()).append('[')
+                    .append(domain.handlerCount()).append(domain.isIdle() ? " idle" : "").append(']');
+        }
+        out.append(isQuiescent() ? ", quiescent" : ", busy");
+        // The one thing a frozen render-on-demand loop needs told and cannot deduce: it is asleep by
+        // its own choice and nothing is able to wake it. Driven only — a paced kernel wakes itself.
+        if (clock instanceof Driven && workListener == NO_WAKE) {
+            out.append(", no wake listener");
+        }
+        return out.append(')').toString();
     }
 }
