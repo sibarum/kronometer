@@ -4,14 +4,21 @@
 > did, and never trade smoothness for either.** Written as the design for the vexelray-gui integration,
 > then corrected by building it. General to any host that owns its own event loop.
 
-**Measured, on Win32 + Vulkan, two applications:**
+**Measured, on Win32 + Vulkan, two applications.** Both idled at ~140 fps drawing a still window, with
+the kernel reporting 99–100 % of those frames unnecessary. Now:
 
-| | before | after |
+| regime | budget | rate |
 |---|---|---|
-| calculator, idle | 142.6 fps, 100 % of frames unnecessary | **0.0 fps**, 99.9 % of wall time parked |
-| text editor, idle | 140.5 fps, 98.7 % unnecessary | **0.0 fps**, 99.2 % parked |
+| unfocused | `forever` | **0 fps** — parked until an event |
+| focused, idle | 200 ms | **5 fps** — the floor, so nothing waits longer than that |
+| animating | 16 ms | **60 fps** — the ceiling |
 
 A worker thread's post wakes the loop for **exactly one frame** and it parks again.
+
+> **Do not read the floor as a failure to reach zero.** It is the design: see
+> [the bound comes first](#the-bound-comes-first-and-the-wakes-are-an-optimisation). Zero-while-focused
+> is achievable only by enumerating every source of change correctly and forever, and the cost of being
+> wrong is a UI that intermittently ignores clicks.
 
 A retained-mode GUI has to answer "does this frame need drawing", and the usual answer is a hand-written
 dirty flag: set it on every mutation, clear it on every present, and spend the rest of the project
@@ -174,11 +181,43 @@ lines and it is the difference between a log line and a day:
 wake path OK: a worker post woke the loop and produced a frame
 ```
 
-## Enumerate every channel of change
+## The bound comes first, and the wakes are an optimisation
 
-Three surfaced in one integration, each found only after the previous fix made it visible. The pattern
-is worth more than the list: **a channel nobody wakes for does not fail loudly — it fails as a UI that
-feels broken in a way nobody can attribute.**
+**Read this before the channel table below, because it is what makes that table survivable.**
+
+Everything that follows is an attempt to enumerate every source of change so that each can wake the
+loop. That approach is correct and it does not hold. Five channels surfaced in one integration, each
+hidden behind the last, and the fifth was found by a user narrowing a bug to a single menu item. The
+list is not closed: the next queue anyone adds, drained once per frame and announcing nothing, silently
+restores a window that ignores a click. **You cannot test for the absence of a wake**, and the symptom —
+occasionally unresponsive, fine again the moment the pointer moves — points nowhere near its cause.
+
+So the guarantee must not depend on the list being complete:
+
+```java
+app.idleRefresh(200_000_000L)    // 5 Hz floor while focused: nothing waits longer than this
+   .maxFrameRate(16_666_666L);   // 60 Hz ceiling while animating
+```
+
+A missed wake now costs **latency instead of a hang**. That is a different kind of defect — bounded,
+uniform, survivable — and it is the whole point. Five wakes a second that mostly find nothing, against
+the 140 frames an unconditional loop was spending, is not a performance question.
+
+Two things keep it cheap. **Focus**: a window nobody is looking at parks indefinitely, so the floor is
+paid only where it can be perceived. **The ceiling**: `sleepTimeout()` reports zero while anything is
+varying, which means "as fast as you can" — on a presenter that does not block, that was 140 fps to
+feed a 60 Hz display.
+
+And the wakes stay, because a floor alone is not enough for good interaction: 200 ms on a click is
+perceptibly sluggish. With both, the common paths respond in zero frames and the uncommon ones respond
+within the floor. **The wakes make it feel instant; the floor makes it correct.** Only one of those is
+allowed to depend on somebody having thought of everything.
+
+## Channels worth waking for
+
+Each buys zero-latency response on a path users hit often. None is load-bearing any more: get one wrong
+and the floor catches it. Five surfaced in one integration, each found only after the previous fix made
+it visible - which is the evidence for the section above, not a list to be completed.
 
 | Channel | Woken by | Symptom when missing |
 |---|---|---|
