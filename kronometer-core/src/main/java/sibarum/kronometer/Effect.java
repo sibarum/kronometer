@@ -3,6 +3,10 @@ package sibarum.kronometer;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
+import sibarum.probe.Lane;
+import sibarum.probe.Probe;
+import sibarum.probe.Zone;
+
 /**
  * A side-effecting reader of the graph. The one kind of node that runs at {@code now} and never ahead.
  *
@@ -119,12 +123,17 @@ public final class Effect {
         if (cancelled) {
             return;
         }
-        Graph.Evaluation<Void> evaluation = graph.evaluate(kron.now(), () -> {
-            body.run();
-            return null;
-        });
-        dependencies = evaluation.dependencies();
-        runs++;
+        // Named by the effect, so the rollup names the animation that is costing the frame rather than
+        // reporting one undifferentiated total for "effects". An effect's name is a constant string it
+        // already holds, so using it as the span name allocates nothing.
+        try (Zone z = Probe.zone(Lane.ANIM, name)) {
+            Graph.Evaluation<Void> evaluation = graph.evaluate(kron.now(), () -> {
+                body.run();
+                return null;
+            });
+            dependencies = evaluation.dependencies();
+            runs++;
+        }
     }
 
     /**

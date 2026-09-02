@@ -14,9 +14,16 @@
 
     <name>Kronometer :: core</name>
     <description>The kernel: logical time, shreds, the timeline, the signal graph and precomputation.
-        No runtime dependencies, by rule.</description>
+        Its one runtime dependency is atchung-probe, which is the stack-wide profiling seam and has no
+        dependencies of its own — a deliberate exception to the no-dependencies rule, because a timing kernel
+        that cannot be timed is the one place the rule costs more than it saves.</description>
 
     <dependencies>
+        <dependency>
+            <groupId>sibarum.atchung</groupId>
+            <artifactId>atchung-probe</artifactId>
+            <version>1.0-SNAPSHOT</version>
+        </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

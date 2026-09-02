@@ -183,8 +183,16 @@ public final class Realtime implements Clock {
     }
 
     private void report(Overrun.Kind kind, long logicalNanos, Dur amount) {
-        listener.accept(new Overrun(
-                kind, new Moment(logicalNanos), amount, new Dur(slipNanos), settlement));
+        Overrun overrun = new Overrun(kind, new Moment(logicalNanos), amount, new Dur(slipNanos), settlement);
+        // Overrun is already observable through the listener, but only to an application that installed one.
+        // The probe sees it unconditionally, which matters because the shape Overrun's own documentation says
+        // to read - LATE that drains versus LATE that climbs - is a shape in the counts, and the counts are
+        // the one thing a listener nobody registered does not produce.
+        if (sibarum.probe.Probe.ON) {
+            sibarum.probe.Probe.mark(sibarum.probe.Lane.TIME, "overrun " + kind, overrun.toString());
+            sibarum.probe.Probe.count(sibarum.probe.Lane.TIME, "slip", slipNanos);
+        }
+        listener.accept(overrun);
     }
 
     @Override

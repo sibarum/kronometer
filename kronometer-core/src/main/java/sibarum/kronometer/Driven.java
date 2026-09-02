@@ -163,8 +163,13 @@ public final class Driven implements Clock {
             long forgiven = advance - maxAdvance.nanos();
             forgivenNanos += forgiven;
             target = nowNanos + maxAdvance.nanos();
-            listener.accept(new Overrun(Overrun.Kind.SKIPPED, new Moment(target),
-                    new Dur(forgiven), new Dur(forgivenNanos), Settlement.SKIP));
+            Overrun overrun = new Overrun(Overrun.Kind.SKIPPED, new Moment(target),
+                    new Dur(forgiven), new Dur(forgivenNanos), Settlement.SKIP);
+            // See Realtime#report: the probe sees this whether or not anybody registered a listener.
+            if (sibarum.probe.Probe.ON) {
+                sibarum.probe.Probe.mark(sibarum.probe.Lane.TIME, "overrun SKIPPED", overrun.toString());
+            }
+            listener.accept(overrun);
         }
         return target;
     }

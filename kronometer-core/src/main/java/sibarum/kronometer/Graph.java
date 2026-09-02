@@ -10,6 +10,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 
+import sibarum.probe.Probe;
+
 /**
  * The signal graph's bookkeeping: dependency collection, versioning, and invalidation.
  *
@@ -190,6 +192,9 @@ final class Graph {
      */
     void invalidate(Moment at, Signal<?> source) {
         version++;
+        // The count that explains a graph doing too much work. An invalidation with no source is the global
+        // kind, and the comment above says why that is the expensive one - so the two are counted apart.
+        Probe.count(sibarum.probe.Lane.ANIM, source == null ? "invalidate (global)" : "invalidate");
         kron.discardPredictionsAfter(at, source);
         for (Effect effect : List.copyOf(reactive)) {
             effect.scheduleRerun(at);

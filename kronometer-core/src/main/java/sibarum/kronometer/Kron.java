@@ -7,6 +7,10 @@ import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.Consumer;
 
+import sibarum.probe.Lane;
+import sibarum.probe.Probe;
+import sibarum.probe.Zone;
+
 /**
  * The runtime: one kernel thread that owns logical time and hands a baton to one shred at a time.
  *
@@ -905,6 +909,9 @@ public final class Kron implements AutoCloseable {
         boolean inline = driven.mode() == Driven.Mode.INLINE;
         hostThread = Thread.currentThread();
         ticks++;
+        // A tick is the host saying "time has passed". Counting them answers the first question any timing
+        // investigation asks, and the one Kron#ticks() already exists to answer: is my clock being driven?
+        Probe.count(Lane.TIME, "tick");
         pump(null, new Moment(driven.logicalFor(elapsedNanos, now.nanos())), inline);
         if (inline) {
             reportFailures();
@@ -965,6 +972,14 @@ public final class Kron implements AutoCloseable {
      * {@code HANDOFF}.
      */
     private void pump(Runnable before, Moment limit, boolean wait) {
+        // One span per batch: the kernel's outermost unit, and the one a host frame waits on.
+        try (Zone batch = Probe.zone(Lane.TIME, "batch")) {
+            pumpBody(before, limit, wait);
+        }
+    }
+
+    /** The body of {@link #pump}, split out only so the span above can wrap the whole of it. */
+    private void pumpBody(Runnable before, Moment limit, boolean wait) {
         ensureKernelThread();
         // From here on nobody outside may touch kernel state directly, and that is permanent: under a
         // driven clock the kernel is idle between ticks, which looks exactly like setup and is not —
@@ -1130,10 +1145,20 @@ public final class Kron implements AutoCloseable {
         return head;
     }
 
+    /**
+     * Give one shred the baton and wait for it back.
+     *
+     * <p>The probe span here is the kernel handoff the architecture notes quote a number for - 342 ns pinned,
+     * 511 ns not. It is the kernel's unit of work, so its count is how much the timeline actually did, and
+     * everything a shred does while holding the baton is inside it. That is correct rather than convenient:
+     * from the kernel's side, the shred running IS the handoff.
+     */
     private void handOff(Shred shred) {
         traceEvent(shred, Trace.Kind.RESUME, "");
-        shred.gate().open();
-        kernelGate.await();
+        try (Zone z = Probe.zone(Lane.TIME, "handoff")) {
+            shred.gate().open();
+            kernelGate.await();
+        }
     }
 
     /** @return whether any dynamic domain had a shred waiting to be stepped */
