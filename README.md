@@ -194,14 +194,24 @@ From an event handler, cross the baton first — `kron.onTimeline(work)` runs in
 there and posts if you are not. And if your loop would rather sleep than redraw a still UI:
 
 ```java
-kron.onWork(loop::nudge);                       // how the kernel ends your wait
+kron.onWork(loop::nudge);                       // how the kernel ends your wait — one call site
 Dur budget = kron.sleepTimeout();               // how long you may wait — FOREVER only if wired
 ```
 
 `sleepTimeout()` hands out an indefinite block **only** when a wake exists to end it, so the classic
 render-on-demand deadlock — window frozen, animation running perfectly on a kernel nobody is ticking —
 is unreachable rather than merely warned about. Unwired, it returns zero and you get today's
-unconditional redraw, which is wasteful and obvious instead of silent and mystifying.
+unconditional redraw, which is wasteful and obvious instead of silent and mystifying. `onWork` has one
+listener slot and last wins silently, so **one call site per `Kron` in the whole application**: a
+profiler or a second adapter installing its own leaves the real loop with nothing to wake it.
+
+That is the kernel's half. The host's half is a **bound**, and building it is what taught us the order:
+a floor under the refresh rate while focused, a ceiling while animating, an unfocused window parked
+outright. Enumerating every source of change so each can wake the loop is not a closed list — the next
+per-frame queue anybody adds silently restores a window that ignores a click — so the wakes are the
+optimisation and the bound is the guarantee. Measured on two real applications, that takes a still
+window from ~140 fps to 5 while focused and 0 while not:
+**[docs/render-on-demand.md](docs/render-on-demand.md)**.
 
 **[docs/adopting.md](docs/adopting.md)** has the rest: which clock, the three mistakes, testing without
 sleeps, and what to do when nothing moves.
@@ -240,6 +250,31 @@ discontinuity instead of unbounded creeping lag. Sustained slip is a capacity pr
 scheduling one, so the real remedy is `frames.degrade(hz(144), hz(72), hz(48))`: ask for less rather
 than fall further behind.
 
+## The kernel reports its own timing
+
+A timing kernel that cannot be timed is the one place a no-dependencies rule costs more than it saves,
+so `kronometer-core` takes exactly one dependency: **`atchung-probe`**, the profiling seam the whole
+stack reports through. It is a leaf — no dependencies of its own, no reflection, native-image clean —
+so depending on the probe is not depending on the bus.
+
+Off unless asked, and free when off: `Probe.ON` is a `static final boolean` the JIT folds `if` blocks
+out of entirely, so instrumented paths cost nothing in a build that is not profiling.
+
+```bash
+java -Dprobe=time,anim -jar app.jar     # or the PROBE env var, identically, on any OS
+```
+
+What the kernel reports, in the two lanes it owns:
+
+| Lane | Reports |
+|---|---|
+| `time` | `batch` and `handoff` spans — the kernel's own units of work, with p99 and max rather than a mean, because a dropped frame is a tail and not an average — plus a `tick` count that answers *is my clock being driven at all*, every overrun as it happens, and slip as a running total |
+| `anim` | one span **per effect, named by the effect**, so the rollup names the animation costing the frame instead of one undifferentiated total; and invalidation counts, with global invalidations counted apart because those are the expensive kind |
+
+Overruns are already observable through a listener — but only to an application that installed one. The
+probe sees them unconditionally, which matters because the shape `Overrun` tells you to read, `LATE`
+that drains versus `LATE` that climbs, is a shape in the counts.
+
 ## Where it sits
 
 A **substrate**, alongside two others, under the GUI at the top of the stack — each its own repo:
@@ -248,18 +283,20 @@ A **substrate**, alongside two others, under the GUI at the top of the stack —
 | --- | --- | --- |
 | **[vexelray-gui](../vexelray-gui)** | Pixels: the retained-mode SDF GUI over Vulkan | consumer |
 | **kronometer** | **Time: when things happen, in what order, and how they move between states** | substrate |
-| **[atchung](../atchung)** | Messages: the in-VM bus, and elektro-Q across processes and the wire | substrate |
+| **[atchung](../atchung)** | Messages: the in-VM bus, and elektro-Q across processes and the wire — plus `atchung-probe`, the profiling seam, which is a leaf and depends on neither | substrate |
 | **[tactroller](../tactroller)** | Input: keyboard/pointer/clipboard middleware | substrate |
 
-Dependencies point **down** and only down: vexelray-gui depends on Kronometer, never the reverse, and
-`kronometer-core` depends on nothing in the ecosystem at all.
+Dependencies point **down** and only down: vexelray-gui depends on Kronometer, never the reverse.
+`kronometer-core`'s single ecosystem dependency is `atchung-probe` — the profiling seam, not the bus,
+and [the one exception to the rule](#the-kernel-reports-its-own-timing).
 
 | Module | What it provides |
 |---|---|
-| `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Metro`, `Clock`, `Settlement`, `Overrun`, `Rate`, `Step`, `Sampled`, `Trace`. Nested time: `Tempo`, `Ratio`. Graph and horizons: `Signal`, `Cell`, `Curve`, `Effect`. Precompute pool in M5. The `Interp` interface. Pure Java, no dependencies. |
+| `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Metro`, `Clock`, `Settlement`, `Overrun`, `Rate`, `Step`, `Sampled`, `Trace`. Nested time: `Tempo`, `Ratio`. Graph and horizons: `Signal`, `Cell`, `Curve`, `Effect`, and the precomputation pool. The `Interp` interface. Pure Java; one dependency, `atchung-probe`. |
 | `kronometer-anim` | The libraries: `Ease` curves, `Turn` (shortest-arc angles in turns), `Hyper` (the Cayley–Dickson tower, with dimension-generic slerp), `Tween`, `Motion`, `Animator`, and both smoother families. Depends only on core. |
 | `kronometer-atchung` | Await an Atchung `Topic` as a yield point, or let one drive a `Cell`; publish on the timeline; carry elektro-Q messages onto it. |
 | `kronometer-demo` | The showcase — headless, so it stays free of a GUI dependency. |
+| `kronometer-bench` | Measurement harnesses, deliberately free of JMH so the same classes run unchanged on the JVM and under native-image — the comparison that decides the kernel's shape. [The numbers](docs/benchmarks/). |
 
 There is deliberately no `kronometer-vexelray` module: every seam is already generic, so the GUI repo
 constructs the `Kron`, ticks it per frame, and exposes it.
@@ -269,9 +306,12 @@ constructs the `Kron`, ticks it per frame, and exposes it.
 - **JDK 25+** (enforced by `maven-enforcer-plugin`) — virtual threads carry shreds, `ScopedValue`
   carries the current one. A **GraalVM** JDK only for native builds.
 - **Maven 3.9+**.
-- No runtime dependencies, native-image clean: no reflection, no proxies, no runtime scanning —
-  dependency tracking is by read-registration, so the graph needs no metadata either. The `native`
-  profile is opt-in so ordinary builds stay fast.
+- **One runtime dependency**: `atchung-probe` `1.0-SNAPSHOT`, which is a leaf. Until it is published,
+  build [atchung](../atchung) first so the artifact is in your local repo.
+- Native-image clean: no reflection, no proxies, no runtime scanning — dependency tracking is by
+  read-registration, so the graph needs no metadata either. There is no Maven profile for it; the
+  benchmarks invoke `native-image` directly, and [docs/benchmarks/baton.md](docs/benchmarks/baton.md)
+  gives the exact command.
 
 ## Build
 
@@ -283,12 +323,17 @@ mvn install    # + install 1.0-SNAPSHOT into your local repo
 ## Status
 
 **M8 — first real consumer.** The kernel, the signal graph and horizons, precomputation, rate domains,
-nested tempos, the animation libraries and the Atchung bridge are built and tested; 192 tests across
-six modules. `offload()` and animated tempo scales are designed but not built.
+nested tempos, the animation libraries and the Atchung bridge are built and tested; 192 tests, all
+green. vexelray-gui has adopted it and the seams held — no `kronometer-vexelray` module was wanted, and
+what adoption added instead was render-on-demand and the probe instrumentation. Off-timeline scheduling
+handles, `settle()`, `offload()`, animated tempo scales, and the frame rate a motion asks for
+(`atMost`) are designed but not built.
 
 [docs/adopting.md](docs/adopting.md) is where to start if you are wiring this into an application.
 [docs/architecture.md](docs/architecture.md) is the source of truth for the design — the kernel, the
 ordering rules, the horizon model, precomputation, rate domains, interpolation, diagnostics, and the
-open questions. [docs/roadmap.md](docs/roadmap.md) records what each milestone actually found, and
+open questions. [docs/render-on-demand.md](docs/render-on-demand.md) is the contract between a host
+loop and the kernel, written as a design and then corrected by building it.
+[docs/roadmap.md](docs/roadmap.md) records what each milestone actually found,
 [docs/consumer-notes.md](docs/consumer-notes.md) is the first consumer's report from the other side of
-the seam.
+the seam, and [docs/benchmarks/](docs/benchmarks/) holds the measurements every number here cites.
