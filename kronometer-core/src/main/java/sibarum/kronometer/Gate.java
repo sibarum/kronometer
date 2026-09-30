@@ -1,5 +1,8 @@
 package sibarum.kronometer;
 
+import sibarum.probe.Lane;
+import sibarum.probe.Probe;
+
 import java.util.concurrent.locks.LockSupport;
 
 /**
@@ -28,6 +31,12 @@ final class Gate {
         open = true;
         Thread w = waiter;
         if (w != null) {
+            if (Probe.ON) {
+                // The two marks bracket a baton pass: this one is the sender, gate.woke is the receiver's
+                // first instruction after the unpark. The gap between them is the scheduler's (a virtual thread
+                // waiting for a carrier, a carrier waiting for the OS), which no span on either side can see.
+                Probe.mark(Lane.TIME, "gate.open", "-> " + w.getName());
+            }
             LockSupport.unpark(w);
         }
     }
@@ -41,8 +50,13 @@ final class Gate {
      */
     void await() {
         waiter = Thread.currentThread();
+        boolean parked = false;
         while (!open) {
+            parked = true;
             LockSupport.park();
+        }
+        if (parked && Probe.ON) {
+            Probe.mark(Lane.TIME, "gate.woke", "");
         }
         open = false;
         waiter = null;
