@@ -11,9 +11,16 @@ the kernel reporting 99–100 % of those frames unnecessary. Now:
 |---|---|---|
 | unfocused | `forever` | **0 fps** — parked until an event |
 | focused, idle | 200 ms | **5 fps** — the floor, so nothing waits longer than that |
-| animating | 16 ms | **60 fps** — the ceiling |
+| animating | one display refresh (6.9 ms at 144 Hz; 16.6 ms is the fallback) | **the display's rate** — the ceiling |
 
 A worker thread's post wakes the loop for **exactly one frame** and it parks again.
+
+> **The ceiling is a real ceiling since the loop holds it against wakes** (`vexelray-gui`, `GuiApp`). It used to be a
+> timed park that any wake ended, and an animation's clock wakes the loop on every tick, so it held nothing: the loop ran
+> frames about 1 ms apart until the present queue pushed back with a 20 ms wait, stamped when drawn and shown a refresh
+> apart, which is a slow stretch and then a lurch at the start of every animation. The figures above are the
+> *intended* ones; the measurements and the fix are in `vexelray-framework/docs/architecture.md`, *what the stall probes
+> found*.
 
 > **Do not read the floor as a failure to reach zero.** It is the design: see
 > [the bound comes first](#the-bound-comes-first-and-the-wakes-are-an-optimisation). Zero-while-focused
@@ -196,8 +203,13 @@ So the guarantee must not depend on the list being complete:
 
 ```java
 app.idleRefresh(200_000_000L)    // 5 Hz floor while focused: nothing waits longer than this
-   .maxFrameRate(16_666_666L);   // 60 Hz ceiling while animating
+   .maxFrameRateToDisplay(16_666_666L);   // ceiling = the display's refresh, read from the window; 60 Hz if it cannot say
 ```
+
+`maxFrameRate(nanos)` is still there for a ceiling below the display's rate (a power saver). Whichever is used, the loop
+holds it against wakes by sleeping out the rest of the gap, so **input that arrives during that sleep waits for it**:
+at most one refresh interval, 6.9 ms at 144 Hz and 16.7 at 60. That is the price of a ceiling that holds, and it is
+why the ceiling should follow the display and not sit below it.
 
 A missed wake now costs **latency instead of a hang**. That is a different kind of defect — bounded,
 uniform, survivable — and it is the whole point. Five wakes a second that mostly find nothing, against
@@ -206,7 +218,8 @@ the 140 frames an unconditional loop was spending, is not a performance question
 Two things keep it cheap. **Focus**: a window nobody is looking at parks indefinitely, so the floor is
 paid only where it can be perceived. **The ceiling**: `sleepTimeout()` reports zero while anything is
 varying, which means "as fast as you can" — on a presenter that does not block, that was 140 fps to
-feed a 60 Hz display.
+feed a 60 Hz display. (A presenter that *does* block, as a windowed one on a compositor does, blocks only once its
+queue is several frames deep, so it bounds the rate and not how far ahead the loop runs. The ceiling bounds both.)
 
 And the wakes stay, because a floor alone is not enough for good interaction: 200 ms on a click is
 perceptibly sluggish. With both, the common paths respond in zero frames and the uncommon ones respond
