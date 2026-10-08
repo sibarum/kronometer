@@ -102,6 +102,18 @@ That costs exactly one step of latency, and Kronometer says so rather than hidin
 can only look backwards, so a frame at `t` shows the value at `t - period`. `latest()` is there for a
 caller who would rather have the latency than the smoothness.
 
+Some steps cannot run on the timeline at all. A GPU simulation is the usual case, because only the render
+thread may submit to the queue. A **`Handoff`** keeps the domain in charge of *when* while the owning thread
+does the work, and gives the blend fraction for state the host cannot blend itself:
+
+```java
+Handoff steps = physics.handoff();
+steps.drain(step -> world.step(step.dt()));         // on the render thread, after kron.tick()
+shader.blend(steps.phase(kron.now()));              // between the last two steps that ran
+```
+
+`hold(true)` pauses it, and releasing does not replay the pause.
+
 Each domain sets its own lookahead — audio wants 100 ms, graphics two frames, physics none — and its
 own **catch-up policy**. `maxCatchUp(0)` drops everything owed after a jump, unbounded replays it all,
 and anything between is the spiral-of-death clamp. What a domain deliberately does *not* own is a slip
@@ -292,7 +304,7 @@ and [the one exception to the rule](#the-kernel-reports-its-own-timing).
 
 | Module | What it provides |
 |---|---|
-| `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Metro`, `Clock`, `Settlement`, `Overrun`, `Rate`, `Step`, `Sampled`, `Trace`. Nested time: `Tempo`, `Ratio`. Graph and horizons: `Signal`, `Cell`, `Curve`, `Effect`, and the precomputation pool. The `Interp` interface. Pure Java; one dependency, `atchung-probe`. |
+| `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Metro`, `Clock`, `Settlement`, `Overrun`, `Rate`, `Step`, `Sampled`, `Handoff`, `Trace`. Nested time: `Tempo`, `Ratio`. Graph and horizons: `Signal`, `Cell`, `Curve`, `Effect`, and the precomputation pool. The `Interp` interface. Pure Java; one dependency, `atchung-probe`. |
 | `kronometer-anim` | The libraries: `Ease` curves, `Turn` (shortest-arc angles in turns), `Hyper` (the Cayley–Dickson tower, with dimension-generic slerp), `Tween`, `Motion`, `Animator`, and both smoother families. Depends only on core. |
 | `kronometer-atchung` | Await an Atchung `Topic` as a yield point, or let one drive a `Cell`; publish on the timeline; carry elektro-Q messages onto it. |
 | `kronometer-demo` | The showcase — headless, so it stays free of a GUI dependency. |

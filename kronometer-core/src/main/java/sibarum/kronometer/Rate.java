@@ -224,6 +224,14 @@ public final class Rate {
     }
 
     /**
+     * This domain's steps, recorded for a thread that is not the timeline's to run: the GPU's, typically, which
+     * only the render thread may submit to. See {@link Handoff}. Fixed domains only.
+     */
+    public Handoff handoff() {
+        return new Handoff(this);
+    }
+
+    /**
      * Compute {@code signal}'s future on this domain's grid, ahead of {@code now}.
      *
      * <p>Requires a fixed grid, and the reason is not an implementation shortcut: a dynamic domain's
