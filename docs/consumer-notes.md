@@ -255,3 +255,22 @@ Items marked ⬆ are the ones this document argues about.
 
 Roughly two thirds of that is genuine adapter work that belongs in the consumer's repo, which is the
 result §13 predicted. The other third is §2 and §3.
+
+---
+
+## 9. A second consumer: vexelray-sim-rigid, and work that must leave the timeline
+
+§3 is about getting onto the timeline from a handler. The rigid-body demo needed the opposite: a step the timeline
+decides is due, done on a thread that is not the timeline's. Its physics runs on the GPU, and a Vulkan queue belongs
+to the render thread (vexelray-framework's `FrameStage.APP`), so a `Rate` handler that dispatched the step itself
+would submit from the kernel's thread.
+
+What it wanted from Kronometer was everything about *when*: a fixed 60 Hz grid, inside a `Tempo` the playback speed
+rescales, with a catch-up bound. Only the *doing* had to move. `Handoff` (`Rate.handoff()`) is that split. The handler
+records each step, and the render thread drains them after the tick and runs them. `phase(at)` gives the blend
+between the last two steps that ran, which is `Sampled`'s one-step lag for state the host cannot blend because it
+lives in GPU buffers. `hold(true)` takes the handler off, so a paused simulation parks its domain, and releasing it
+drops whatever the domain would otherwise replay of the pause.
+
+Nothing else was missing. The tempo, the rate, `onTimeline` for a rescale from a handler, and render-on-demand's
+deadlines all worked as written.

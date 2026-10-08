@@ -335,9 +335,12 @@ mvn install    # + install 1.0-SNAPSHOT into your local repo
 ## Status
 
 **M8 — first real consumer.** The kernel, the signal graph and horizons, precomputation, rate domains,
-nested tempos, the animation libraries and the Atchung bridge are built and tested; 192 tests, all
+nested tempos, the animation libraries and the Atchung bridge are built and tested; 197 tests, all
 green. vexelray-gui has adopted it and the seams held — no `kronometer-vexelray` module was wanted, and
-what adoption added instead was render-on-demand and the probe instrumentation. Off-timeline scheduling
+what adoption added instead was render-on-demand and the probe instrumentation. A second consumer,
+vexelray-sim-rigid's demo, steps a GPU simulation on a fixed rate in a playback tempo, and what it added is
+`Handoff`, for steps that must run on a thread that is not the timeline's (see
+[docs/consumer-notes.md §9](docs/consumer-notes.md)). Off-timeline scheduling
 handles, `settle()`, `offload()`, animated tempo scales, and the frame rate a motion asks for
 (`atMost`) are designed but not built.
 
