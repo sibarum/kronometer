@@ -114,6 +114,22 @@ shader.blend(steps.phase(kron.now()));              // between the last two step
 
 `hold(true)` pauses it, and releasing does not replay the pause.
 
+A world that should **slow** rather than skip, when its steps cost more than its grid allows, is a **`Dilated`**
+domain instead. The grid still says when a step is due, but the world's time is counted by the steps that finish,
+not kept by the timeline: owed steps past a bound are forgiven, never repaid in a burst, so game time falls behind
+the wall while everything on the timeline (the interface's own animation among it) keeps the wall's time. It is not
+a settlement, because the timeline has one slip and stretching it would slow the interface with the world.
+
+```java
+Dilated world = physics.dilated(2);                 // at most two steps owed
+world.onDue(worker::wake);                          // on the timeline
+while (world.take()) { step(world.dt()); world.finished(System.nanoTime()); }   // on the worker
+shader.blend(world.phase(System.nanoTime()));       // towards the next, as predicted
+```
+
+`phase` is the time since the newest finished step over the predicted interval to the next, corrected by every
+step; `dilation()` reads how fast the world is running against the wall.
+
 Each domain sets its own lookahead — audio wants 100 ms, graphics two frames, physics none — and its
 own **catch-up policy**. `maxCatchUp(0)` drops everything owed after a jump, unbounded replays it all,
 and anything between is the spiral-of-death clamp. What a domain deliberately does *not* own is a slip
@@ -304,7 +320,7 @@ and [the one exception to the rule](#the-kernel-reports-its-own-timing).
 
 | Module | What it provides |
 |---|---|
-| `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Metro`, `Clock`, `Settlement`, `Overrun`, `Rate`, `Step`, `Sampled`, `Handoff`, `Trace`. Nested time: `Tempo`, `Ratio`. Graph and horizons: `Signal`, `Cell`, `Curve`, `Effect`, and the precomputation pool. The `Interp` interface. Pure Java; one dependency, `atchung-probe`. |
+| `kronometer-core` | Kernel and time: `Kron`, `Shred`, `Time`, `Dur`, `Moment`, `Trigger`, `Metro`, `Clock`, `Settlement`, `Overrun`, `Rate`, `Step`, `Sampled`, `Handoff`, `Dilated`, `Trace`. Nested time: `Tempo`, `Ratio`. Graph and horizons: `Signal`, `Cell`, `Curve`, `Effect`, and the precomputation pool. The `Interp` interface. Pure Java; one dependency, `atchung-probe`. |
 | `kronometer-anim` | The libraries: `Ease` curves, `Turn` (shortest-arc angles in turns), `Hyper` (the Cayley–Dickson tower, with dimension-generic slerp), `Tween`, `Motion`, `Animator`, and both smoother families. Depends only on core. |
 | `kronometer-atchung` | Await an Atchung `Topic` as a yield point, or let one drive a `Cell`; publish on the timeline; carry elektro-Q messages onto it. |
 | `kronometer-demo` | The showcase — headless, so it stays free of a GUI dependency. |
@@ -340,7 +356,8 @@ green. vexelray-gui has adopted it and the seams held — no `kronometer-vexelra
 what adoption added instead was render-on-demand and the probe instrumentation. A second consumer,
 vexelray-sim-rigid's demo, steps a GPU simulation on a fixed rate in a playback tempo, and what it added is
 `Handoff`, for steps that must run on a thread that is not the timeline's (see
-[docs/consumer-notes.md §9](docs/consumer-notes.md)). Off-timeline scheduling
+[docs/consumer-notes.md §9](docs/consumer-notes.md)), and then `Dilated`, for a world on a thread of its own whose
+time slows when its steps do. Off-timeline scheduling
 handles, `settle()`, `offload()`, animated tempo scales, and the frame rate a motion asks for
 (`atMost`) are designed but not built.
 

@@ -232,6 +232,17 @@ public final class Rate {
     }
 
     /**
+     * This domain's steps, run back to back on a thread of their own, with a time of their own that is counted by
+     * the steps that finish rather than kept by the timeline: a world that slows when its steps are slow, while
+     * everything on the timeline keeps the wall's time. See {@link Dilated}. Fixed domains only.
+     *
+     * @param mostBehind the most steps owed that are kept to run; past that they are forgiven, and the world slows
+     */
+    public Dilated dilated(int mostBehind) {
+        return new Dilated(this, mostBehind);
+    }
+
+    /**
      * Compute {@code signal}'s future on this domain's grid, ahead of {@code now}.
      *
      * <p>Requires a fixed grid, and the reason is not an implementation shortcut: a dynamic domain's
