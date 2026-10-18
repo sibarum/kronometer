@@ -364,7 +364,16 @@ public final class Kron implements AutoCloseable {
             }
         }
         if (nextDeadlineNanos != Long.MAX_VALUE) {
-            reasons.add("timeline: next entry at " + new Moment(nextDeadlineNanos));
+            // Whose entry, not just when: a repeating shred is the commonest never-quiet kernel, and a moment alone
+            // left "which of these sporks is it" to a debugger. Read without polling, so asking changes nothing.
+            java.util.Set<String> due = new java.util.TreeSet<>();
+            for (Entry entry : timeline) {
+                if (!entry.isStale() && entry.moment().nanos() == nextDeadlineNanos) {
+                    due.add(entry.shred().name());
+                }
+            }
+            reasons.add("timeline: next entry at " + new Moment(nextDeadlineNanos)
+                    + (due.isEmpty() ? "" : " (" + String.join(", ", due) + ")"));
         }
         for (Rate domain : domains) {
             long line = domain.nextGridLineNanos();

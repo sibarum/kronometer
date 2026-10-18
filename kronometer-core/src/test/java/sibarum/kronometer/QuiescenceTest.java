@@ -40,6 +40,8 @@ class QuiescenceTest {
 
             assertFalse(kron.isQuiescent());
             assertEquals(new Moment(ms(100).nanos()), kron.nextDeadline());
+            assertTrue(kron.whyBusy().stream().anyMatch(r -> r.startsWith("timeline:") && r.endsWith("(late)")),
+                    "the reason names the shred it is waiting for: " + kron.whyBusy());
 
             kron.tick(ms(100).nanos());
             assertTrue(kron.isQuiescent());
