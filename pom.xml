@@ -78,6 +78,20 @@
         </pluginManagement>
 
         <plugins>
+            <!-- Stamps this build with the exact source of its binaries (the commit, plus a digest of any uncommitted
+                 change), so whatever is built on it knows what it was built from. See vexelray-build/README.md. -->
+            <plugin>
+                <groupId>dev.vexelray.build</groupId>
+                <artifactId>vexelray-build-maven-plugin</artifactId>
+                <version>0.1.0-SNAPSHOT</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>identify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
