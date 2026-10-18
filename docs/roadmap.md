@@ -643,8 +643,11 @@ thing left in it is that `Sink` takes a float and `DoubleConsumer` a double.
   arguably the right semantics — a cell nothing reads does not need settling for the loop to go quiet —
   but procedural tweens are shreds, and "complete rather than cancelled" for a shred parked in a `Metro`
   loop is a new kernel operation, not a tempo trick. Its own milestone.
-- **`Topic` driving a `Cell` at `horizon == now`** is still reported untested by the consumer rather
-  than working, and nothing here changes that.
+- **`Topic` driving a `Cell` at `horizon == now`** is now tested in the consumer's shape:
+  `KronBridgeTest.topicDrivesACellInADrivenLoop` publishes from a worker thread into a `Kron.driven()`
+  loop that drains then ticks, and checks the value lands in the tick it was drained before, the cell
+  stays at `horizon == now`, and live input leaves the loop quiescent. It passed first time. What is
+  still open is the consumer's side: the GUI's input enters through its own dispatch, not a `Topic`.
 
 ### Designed, not built — the frame rate the graph asks for
 

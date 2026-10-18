@@ -8,6 +8,7 @@ import sibarum.atchung.Backpressure;
 import sibarum.atchung.Topic;
 import sibarum.kronometer.Cell;
 import sibarum.kronometer.Curve;
+import sibarum.kronometer.Dur;
 import sibarum.kronometer.Kron;
 import sibarum.kronometer.Moment;
 import sibarum.kronometer.Predict;
@@ -67,6 +68,57 @@ class KronBridgeTest {
         assertEquals(List.of(
                 "@10ms=0.0", "@20ms=0.0", "@30ms=10.0", "@40ms=10.0",
                 "@50ms=10.0", "@60ms=18.0", "@70ms=18.0"), observed);
+    }
+
+    @Test
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @DisplayName("a topic drives a cell at horizon == now under a driven clock, the way a GUI loop wires it")
+    void topicDrivesACellInADrivenLoop() throws Exception {
+        List<String> shown = new ArrayList<>();
+        Atchung bus = Atchung.create();
+        try (Kron kron = Kron.driven();
+             KronBridge bridge = new KronBridge(kron, bus)) {
+
+            Rate frames = kron.dynamic("frames");
+            Cell<Double> pointer = bridge.cell(POINTER, 0.0);
+            Signal<Double> derived = kron.computed("derived", () -> pointer.get() * 2);
+            kron.effect(frames, () -> shown.add(Time.now() + "=" + derived.get()));
+            kron.onWork(() -> { });
+
+            // The frame loop, as adopting.md §3 writes it: deliver this frame's input, then tick.
+            bridge.drain();
+            kron.tick(ms(16).nanos());
+            assertEquals(kron.now(), pointer.horizon(), "fed from the bus: unpredictable");
+            // Live input is unpredictable, not varying: a cell nobody is writing must not keep a
+            // render-on-demand loop awake, or every app with a pointer would redraw flat out.
+            assertTrue(kron.isQuiescent(), () -> "idle with live input: " + kron.whyBusy());
+            assertEquals(Dur.FOREVER, kron.sleepTimeout());
+
+            // A GUI handler publishes from a worker thread. Nothing reaches the graph until the host
+            // drains, so the graph is never mutated from the worker.
+            Thread worker = Thread.ofPlatform().start(() -> bus.publish(POINTER, 5.0));
+            worker.join();
+            assertTrue(bridge.hasPending(), "the event waits on the pump, not on the timeline");
+            assertEquals(0.0, pointer.get(), "and the cell has not moved off the timeline");
+
+            bridge.drain();
+            kron.tick(ms(32).nanos());
+            assertEquals(kron.now(), pointer.horizon(), "still live after a write: horizon == now");
+            assertTrue(kron.isQuiescent(), () -> "idle again once the value has landed: " + kron.whyBusy());
+
+            // Several moves between two frames coalesce: the frame that presents shows the newest.
+            Thread mover = Thread.ofPlatform().start(() -> {
+                bus.publish(POINTER, 6.0);
+                bus.publish(POINTER, 7.0);
+            });
+            mover.join();
+            bridge.drain();
+            kron.tick(ms(48).nanos());
+
+            assertEquals(2, bridge.delivered());
+        }
+        // Delivered before the tick, so the frame that presents a value is the frame that computed it.
+        assertEquals(List.of("@16ms=0.0", "@32ms=10.0", "@48ms=14.0"), shown);
     }
 
     @Test
