@@ -83,6 +83,8 @@ public final class Tempo {
     private Effect follower;
     /** The speed {@link #follower} last glided to, so a re-run that changes nothing does nothing. */
     private Ratio followTarget;
+    /** {@link #time()}, made once so that reading it is a dependency on one signal, not a new one each time. */
+    private Signal<Dur> timeSignal;
 
     Tempo(Kron kron, String name, Tempo parent, Ratio scale, Moment globalOrigin) {
         this.kron = kron;
@@ -145,6 +147,48 @@ public final class Tempo {
     /** How much local time has elapsed in this tempo as of the current moment. */
     public Dur elapsed() {
         return elapsedAt(kron.now());
+    }
+
+    /**
+     * This tempo's local clock, as a signal: {@link #elapsedAt} of whatever moment it is asked about.
+     *
+     * <p>What a consumer builds a phase on when it runs on one clock while something else runs on
+     * another: a tone in a tempo that glides has the phase {@code f · time()}, and a pitch-bend is a glide
+     * on that tempo, with the integral already done here.
+     *
+     * <p><b>It memoizes nothing, and that is required rather than incidental.</b> A reader that
+     * interpolates across a block reads it at both ends of the block within one evaluation; a
+     * {@code kron.computed} is memoized per evaluation by identity alone, so both reads would return the
+     * first and the block would advance by zero. This is a plain signal, so asking twice at two moments
+     * gives two answers. Reading it does register a dependency, so a computed over it inherits its
+     * horizon, which is {@link #horizon()}: a phase in a live tempo is not computed ahead.
+     */
+    public Signal<Dur> time() {
+        if (timeSignal == null) {
+            timeSignal = new Signal<>() {
+                @Override
+                public Dur get() {
+                    return at(kron.graph().evaluatingAt());
+                }
+
+                @Override
+                public Dur at(Moment at) {
+                    kron.graph().observe(this);
+                    return elapsedAt(at);
+                }
+
+                @Override
+                public Moment horizon() {
+                    return Tempo.this.horizon();
+                }
+
+                @Override
+                public String toString() {
+                    return "time(" + name + ")";
+                }
+            };
+        }
+        return timeSignal;
     }
 
     /**

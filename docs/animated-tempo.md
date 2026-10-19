@@ -250,7 +250,15 @@ Where the horizon gets consumed:
    Undoing either piece of wiring makes its test fail. Without them, the prediction-invisibility test still
    passed, because retraction made the over-eager prediction wasted work rather than wrong output.
    234 tests green.
-7. **`Tempo.time()`**, plus a note in `consumer-notes.md` on building faizuray's phase over it.
+7. ~~**`Tempo.time()`**, plus a note in `consumer-notes.md` on building faizuray's phase over it.~~ **Done.**
+   `time()` is one cached plain signal: it reads `elapsedAt` at whatever moment it is asked about, registers
+   itself as a dependency, and reports the tempo's horizon. `TempoTimeTest` checks three things: it matches the map
+   through an exponential glide, a computed over it inherits the horizon (forever, forever, then `now` when
+   live), and a block read at both ends advances 2 ms per 1 ms in a 2:1 tempo, predicted or not. Wrapping the
+   clock in `kron.computed` makes that last test fail exactly as faizuray's rule 2 warns: 2 ms per block without
+   prediction, zero with it. `consumer-notes.md` §10 is the faizuray guidance. It covers reading `time()`
+   directly, the one change needed on faizuray's side (a `Closed` phase that reports its tempo's horizon), and
+   exactness per glide shape.
 8. **Audit and measure**: `Dilated`, `Handoff`, and `gridLine` cost under a glide against the affine path.
    That is a `kronometer-bench` entry with a gate, at 48 kHz in a gliding tempo.
 

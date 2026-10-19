@@ -274,3 +274,45 @@ drops whatever the domain would otherwise replay of the pause.
 
 Nothing else was missing. The tempo, the rate, `onTimeline` for a rescale from a handler, and render-on-demand's
 deadlines all worked as written.
+
+## 10. A third consumer, ahead of time: faizuray, and phase on a tempo's clock
+
+Written from the kernel side for M9 (see [animated-tempo.md](animated-tempo.md)), before faizuray has adopted it,
+so this is guidance, not a report.
+
+faizuray already builds phase on Kronometer: `com.faizuray.kron.Phase` returns a phase in turns as a closed-form
+signal of **global** time (`seconds(at)` since `Moment.ORIGIN`). A pitch-bend there is `Phase.glide`, a quadratic
+it writes down itself. To run phase on one clock while tempo runs on another, it wants the phase written over a
+**tempo's** local time instead. `Tempo.time()` is that clock, and the integral is already done by the tempo:
+
+```java
+Tempo pitch = kron.tempo().child("pitch", Ratio.ONE);    // the phase clock
+Tempo beat  = kron.tempo().child("beat",  Ratio.ONE);    // the tempo clock, for rhythm
+
+// phase in turns = f · local seconds; a bend is a glide on `pitch`, a time-stretch is a glide on `beat`
+Signal<Dur> local = pitch.time();
+ToDoubleFunction<Moment> phase = at -> 440.0 * local.at(at).toSeconds();
+
+pitch.glide(Ratio.of(3, 2), ms(400), Glide.EXPONENTIAL);  // up a fifth, evenly in log-pitch
+```
+
+Three things to get right, each found the hard way on one side or the other:
+
+1. **Read `time()` directly; never wrap it in `kron.computed`.** faizuray's rule 2 ("Voice parameters must not
+   memoize") applies to this clock too. `TempoTimeTest` checks it: with the clock wrapped in a computed, a block
+   that reads it at both ends advanced 2 ms per block without prediction and **zero** with it. That is the silent
+   failure faizuray's `Phase` note describes.
+2. **Inherit the tempo's horizon.** `Phase`'s `Closed` record reports `horizon() == FOREVER` and does not register
+   what it reads, which is right for a function of global time and wrong for one of a tempo's time. A phase over a
+   tempo must report `tempo.horizon()`, so that a phase in a `live()` tempo is not rendered ahead; `Voice.horizon()`
+   takes the narrowest of its partials, so that is all it needs. A `Closed` variant that takes the tempo and
+   reports its horizon is the small change on faizuray's side.
+3. **Exactness is per glide shape.** A `LINEAR` glide's local time is exact to the nanosecond throughout. An
+   `EXPONENTIAL` glide is computed in `double` during the glide (with `StrictMath`, so it is the same everywhere) and
+   exact again from its end. For phase this means: overtones that are integer multiples of one tempo's clock stay
+   exactly locked in either shape, because they read the same local time, but two *different* tempos are
+   commensurate again only after their glides end.
+
+Not provided, deliberately: anything about keeping overtones phase-aligned while one clock glides against another.
+That is the Kuramoto clutch, and it belongs in faizuray. Kronometer's part is two exact clocks and an honest
+account of how far ahead each is known.
