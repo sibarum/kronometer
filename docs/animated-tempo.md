@@ -259,8 +259,36 @@ Where the horizon gets consumed:
    prediction, zero with it. `consumer-notes.md` §10 is the faizuray guidance. It covers reading `time()`
    directly, the one change needed on faizuray's side (a `Closed` phase that reports its tempo's horizon), and
    exactness per glide shape.
-8. **Audit and measure**: `Dilated`, `Handoff`, and `gridLine` cost under a glide against the affine path.
-   That is a `kronometer-bench` entry with a gate, at 48 kHz in a gliding tempo.
+8. ~~**Audit and measure**: `Dilated`, `Handoff`, and `gridLine` cost under a glide against the affine path.
+   That is a `kronometer-bench` entry with a gate, at 48 kHz in a gliding tempo.~~ **Done.** The audit found
+   two pre-existing bugs, both about tempo in general rather than glides, and both now fixed and tested in
+   `TempoBlendTest`:
+   - **Blends spanned local time.** `Handoff.phase` and `Sampled` blended across `step.dt()`, which is the
+     period in the domain's *local* time, while they are read at global moments. In a 1:4 tempo a 20 ms step
+     is 80 ms of wall, so the blend finished in a quarter of the step and then froze: slow motion that
+     stutters, which is the canonical case tempo exists for. `Rate.wallSpan(step)` now gives the global
+     distance to the next grid line. It is computed on the timeline, and both blends use it.
+   - **A waiting domain ignored tempo changes.** A fixed domain worked out its next grid line and then
+     waited for that moment. A rescale during the wait made the step fire early (slowed) or late
+     (sped up, then replaying a step as catch-up). The domain now waits on a `retimed` trigger with the line
+     as its timeout. Every tempo change fires the trigger, and the domain works the line out again.
+
+   `Dilated` needed nothing. It counts steps and measures wall intervals between finishes, so nothing in it
+   treats local time as wall time; a test pins that down under an exponential glide.
+   [benchmarks/tempo.md](benchmarks/tempo.md) has the measurement:
+   - **Conversions:** under a glide they cost 165 ns (linear) and 19 ns (exponential) at p50, against a gate
+     of 2 083 ns.
+   - **Steps:** a 48 kHz step costs 1.75× (linear) and 1.38× (exponential) the constant-tempo step, against a
+     gate of 2×.
+   - **The first run failed the step gate.** Three exactness-neutral changes fixed it, and so did a bug in the
+     harness: it divided by the wrong step count.
+
+## Status
+
+**M9 is complete.** Every step above is done, and the exit criteria below are met by the tests named in each
+step, with one exception: the gridLine cost under a glide is recorded for the JVM only, not native-image. Left for
+later, as listed below: smoothstep segments, arbitrary `Curve` speeds, `samp` as a base unit, and the unexplained
+~2× step cost of any non-1:1 tempo noted in the benchmark.
 
 ## Exit criteria
 

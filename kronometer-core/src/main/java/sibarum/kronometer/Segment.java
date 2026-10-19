@@ -118,6 +118,9 @@ sealed interface Segment permits Segment.Hold, Segment.Linear, Segment.Exponenti
         private final BigInteger delta;
         /** {@code floor(I(extent))}: where the glide ends, and where the hold after it starts from. */
         private final long atEnd;
+        /** {@code α/Δ} and {@code β/Δ} in double, for the inverse's candidate only; the fix-up is exact. */
+        private final double a;
+        private final double b;
 
         Linear(BigInteger n0, BigInteger d0, Ratio to, long extent) {
             if (n0.signum() <= 0 || d0.signum() <= 0) {
@@ -139,6 +142,9 @@ sealed interface Segment permits Segment.Hold, Segment.Linear, Segment.Exponenti
             this.beta = twoD.multiply(this.n0).multiply(d1);
             this.delta = twoD.multiply(this.d0).multiply(d1);
             this.atEnd = integral(extent);
+            double deltaD = delta.doubleValue();
+            this.a = alpha.doubleValue() / deltaD;
+            this.b = beta.doubleValue() / deltaD;
         }
 
         /** A glide from the exact speed {@code from} to {@code to}. */
@@ -196,8 +202,9 @@ sealed interface Segment permits Segment.Hold, Segment.Linear, Segment.Exponenti
         /**
          * The candidate for {@link #leastReaching}. Within the glide, the root of
          * {@code α·x² + β·x = γ} with {@code γ = target·Δ}, written as {@code 2γ / (β + √(β² + 4αγ))} so
-         * that it holds for a glide that speeds up and one that slows down alike, with the square root
-         * taken as an exact integer floor. The fix-up in {@link #leastReaching} absorbs the rounding.
+         * that it holds for a glide that speeds up and one that slows down alike, evaluated in
+         * {@code double}. The fix-up in {@link #leastReaching} absorbs the rounding, against the exact
+         * forward map, so exactness lives in {@link #advance} and this only has to be close.
          */
         long closedForm(long target) {
             if (target <= 0) {
@@ -207,11 +214,13 @@ sealed interface Segment permits Segment.Hold, Segment.Linear, Segment.Exponenti
             if (target > atEnd) {
                 return Math.addExact(extent, Tempo.leastReaching(to, target - atEnd));
             }
-            BigInteger gamma = BigInteger.valueOf(target).multiply(delta);
-            BigInteger root = beta.multiply(beta).add(alpha.multiply(gamma).shiftLeft(2)).sqrt();
-            BigInteger twoGamma = gamma.shiftLeft(1);
-            BigInteger divisor = beta.add(root);
-            return floorDiv(twoGamma.add(divisor).subtract(BigInteger.ONE), divisor).longValueExact();
+            // In double: I(x) = a·x² + b·x with a = α/Δ and b = β/Δ = r0. A nanosecond count of a glide is far
+            // inside a double's exact integers, and the stable form has no cancellation, so this lands within a
+            // nanosecond; the exact BigInteger version took most of a conversion's cost for the same answer.
+            double k = target;
+            double root = Math.sqrt(Math.max(0.0, b * b + 4.0 * a * k));
+            double x = 2.0 * k / (b + root);
+            return Math.clamp((long) Math.ceil(x), 0L, extent);
         }
 
         /** {@code floor(I(x))}, exactly. */

@@ -68,6 +68,8 @@ public final class Tempo {
     private Ratio effective;
     /** The end of the composed piece, or {@code null} when nothing in the chain is gliding. */
     private Moment composedUntil;
+    /** Local time at the last nanosecond of the composed piece: fixed with the plan, so the inverse need not redo it. */
+    private long composedLast;
     /** Where the flattened piece is anchored, in global time. */
     private Moment tailStart;
     /** Local elapsed time at {@link #tailStart}. */
@@ -222,7 +224,7 @@ public final class Tempo {
      */
     public Moment globalAt(Dur localElapsed) {
         long target = localElapsed.nanos();
-        if (composedUntil != null && composed(composedUntil.minus(Dur.ns(1))) >= target) {
+        if (composedUntil != null && composedLast >= target) {
             // Reached before the knot, so the least moment is the composed piece's own least moment.
             long parentTarget = Math.addExact(segmentStart, segment.leastReaching(target - segmentOffset));
             return parent == null ? new Moment(parentTarget) : parent.globalAt(new Dur(parentTarget));
@@ -509,6 +511,7 @@ public final class Tempo {
             this.composedUntil = knot;
             this.tailStart = knot;
             this.tailLocal = new Dur(composed(knot));
+            this.composedLast = composed(knot.minus(Dur.ns(1)));
         } else {
             this.composedUntil = null;
             this.tailStart = at;
