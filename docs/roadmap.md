@@ -16,6 +16,7 @@ design.
 | ~~**M6**~~ | ~~`kronometer-anim`~~ | **done** — 142 tests green; rotation generalized to the Cayley–Dickson tower | — |
 | ~~**M7**~~ | ~~`kronometer-atchung` + headless demo~~ | **done** — 155 tests green; idle-parking closed, invalidation made targeted | — |
 | **M8** | First real consumer | vexelray-gui adopts it; tactroller harness lands | — |
+| **M9** | Animated tempo scales | glides with an exact integral, an honest `Tempo.horizon()`. [Plan](animated-tempo.md) | — |
 
 Cross-cutting rules, every milestone:
 
