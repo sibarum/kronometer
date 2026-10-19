@@ -1,7 +1,9 @@
 package sibarum.kronometer;
 
 import java.math.BigInteger;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -43,23 +45,39 @@ public final class Tempo {
     private final Tempo parent;
     private final List<Tempo> children = new CopyOnWriteArrayList<>();
 
-    /** The current stretch of speed relative to the parent: local time per parent time. */
+    // The map from global time to local time has at most two pieces, and both are fixed when a segment
+    // begins anywhere in this tempo's ancestry, so converting a future moment never depends on whether
+    // anything has happened yet:
+    //
+    //   composed   before composedUntil: the parent's map, then this tempo's segment. Used while a glide
+    //              is still running here or in any ancestor.
+    //   flattened  from tailStart on: tailLocal + floor(effective × (g − tailStart)), one exact Ratio for
+    //              the whole chain. The only piece when nothing in the chain is gliding, as before glides.
+    //
+    // composedUntil is the latest knot in the chain, so a glide ends without anything having to happen:
+    // the flattened piece simply takes over at the knot.
+
+    /** The current stretch of speed relative to the parent. */
     private Segment segment;
-    /** Scale relative to the root, cached: {@code parent.effective × scale}. */
+    /** Parent-local nanoseconds at which {@link #segment} starts. */
+    private long segmentStart;
+    /** Local nanoseconds added to the segment's advance: what keeps local time continuous across changes. */
+    private long segmentOffset;
+
+    /** Scale relative to the root once every glide in the chain has settled: the product of end speeds. */
     private Ratio effective;
-    /** The global moment at which this tempo's local clock read {@link #localAtOrigin}. */
-    private Moment globalOrigin;
-    /** Local elapsed time at {@link #globalOrigin}. */
-    private Dur localAtOrigin;
+    /** The end of the composed piece, or {@code null} when nothing in the chain is gliding. */
+    private Moment composedUntil;
+    /** Where the flattened piece is anchored, in global time. */
+    private Moment tailStart;
+    /** Local elapsed time at {@link #tailStart}. */
+    private Dur tailLocal;
 
     Tempo(Kron kron, String name, Tempo parent, Ratio scale, Moment globalOrigin) {
         this.kron = kron;
         this.name = name;
         this.parent = parent;
-        this.segment = new Segment.Hold(scale);
-        this.effective = parent == null ? scale : parent.effective.times(scale);
-        this.globalOrigin = globalOrigin;
-        this.localAtOrigin = Dur.ZERO;
+        rebuild(globalOrigin, 0, new Segment.Hold(scale));
     }
 
     // ------------------------------------------------------------------ API
@@ -80,14 +98,21 @@ public final class Tempo {
         return parent == null;
     }
 
-    /** This tempo's rate relative to its parent. */
+    /**
+     * This tempo's rate relative to its parent. During a {@link #glide}, the rate it is gliding to: the
+     * rate in between is exact but not, in general, a {@code Ratio} of {@code long}s.
+     */
     public Ratio scale() {
         return switch (segment) {
             case Segment.Hold hold -> hold.speed();
+            case Segment.Linear glide -> glide.endSpeed();
         };
     }
 
-    /** This tempo's rate relative to the root — the product of every scale on the way up. */
+    /**
+     * This tempo's rate relative to the root — the product of every scale on the way up, each one the
+     * rate its tempo holds or is gliding to.
+     */
     public Ratio effectiveScale() {
         return effective;
     }
@@ -115,7 +140,10 @@ public final class Tempo {
      * a local instant counts as reached only once it has fully elapsed. See {@link #floorScaled}.
      */
     public Dur elapsedAt(Moment global) {
-        return localAtOrigin.plus(new Dur(floorScaled(effective, global.since(globalOrigin).nanos())));
+        if (composedUntil != null && global.isBefore(composedUntil)) {
+            return new Dur(composed(global));
+        }
+        return tailLocal.plus(new Dur(floorScaled(effective, global.since(tailStart).nanos())));
     }
 
     /**
@@ -137,17 +165,25 @@ public final class Tempo {
      * moment rounded up to the next nanosecond, where the rounded inverse used to round to nearest.
      */
     public Moment globalAt(Dur localElapsed) {
-        long target = localElapsed.minus(localAtOrigin).nanos();
-        long fromOrigin = leastReaching(effective, target);
-        return globalOrigin.plus(new Dur(fromOrigin));
+        long target = localElapsed.nanos();
+        if (composedUntil != null && composed(composedUntil.minus(Dur.ns(1))) >= target) {
+            // Reached before the knot, so the least moment is the composed piece's own least moment.
+            long parentTarget = Math.addExact(segmentStart, segment.leastReaching(target - segmentOffset));
+            return parent == null ? new Moment(parentTarget) : parent.globalAt(new Dur(parentTarget));
+        }
+        Moment least = tailStart.plus(new Dur(leastReaching(effective, target - tailLocal.nanos())));
+        return composedUntil != null && least.isBefore(composedUntil) ? composedUntil : least;
     }
 
-    /** A local duration, expressed in global time. */
+    /**
+     * A local duration, expressed in global time, at the scale this tempo holds or is gliding to. Exact
+     * for a constant chain; during a glide, see {@link #globalAt} for moments.
+     */
     public Dur toGlobal(Dur local) {
         return effective.reciprocal().scale(local);
     }
 
-    /** A global duration, expressed in this tempo's local time. */
+    /** A global duration, expressed in this tempo's local time, at the scale it holds or is gliding to. */
     public Dur toLocal(Dur global) {
         return effective.scale(global);
     }
@@ -165,6 +201,43 @@ public final class Tempo {
             return;
         }
         begin("rescale()", new Segment.Hold(newScale));
+    }
+
+    /**
+     * Change this tempo's rate gradually: from whatever it is now to {@code to}, in a straight line, over
+     * {@code over} of the <em>parent's</em> time, and then hold {@code to}.
+     *
+     * <p>Speed is continuous, so local time is continuous with a continuous rate: a glide that replaces
+     * one in progress starts from the exact speed the old one had reached. Local time is the exact integral
+     * of that speed, rounded down to the nanosecond, and once the glide ends the tempo converts through one
+     * exact {@link Ratio} again, so grids that were commensurate line up again.
+     *
+     * <p>Like {@link #rescale}, this retracts everything predicted beyond now. The glide itself is pure, so
+     * the subtree is predictable through all of it.
+     */
+    public void glide(Ratio to, Dur over) {
+        Objects.requireNonNull(to, "to");
+        Objects.requireNonNull(over, "over");
+        if (over.nanos() <= 0) {
+            throw new IllegalArgumentException("a glide needs a positive duration: " + over);
+        }
+        kron.requireOnTimeline("glide()");
+        long elapsed = parentLocal(kron.now()) - segmentStart;
+        Segment next = switch (segment) {
+            case Segment.Hold hold -> {
+                if (hold.speed().equals(to)) {
+                    yield null;
+                }
+                yield Segment.Linear.between(hold.speed(), to, over.nanos());
+            }
+            case Segment.Linear glide -> {
+                BigInteger[] from = glide.speedAt(elapsed);
+                yield new Segment.Linear(from[0], from[1], to, over.nanos());
+            }
+        };
+        if (next != null) {
+            begin("glide()", next);
+        }
     }
 
     /**
@@ -202,17 +275,88 @@ public final class Tempo {
     /**
      * End the current segment at now and start {@code next}.
      *
-     * <p>The subtree is rebased first, so the segment that ends is folded into the origins and local time
-     * is continuous across the change; then everything predicted beyond now is retracted, because the map
-     * it was computed through no longer holds.
+     * <p>Local time for the whole subtree is read at now under the old maps first, and every tempo in it
+     * is then re-anchored to read the same value under the new ones, so nothing jumps. Then everything
+     * predicted beyond now is retracted, because the map it was computed through no longer holds.
      */
     private void begin(String operation, Segment next) {
         kron.requireOnTimeline(operation);
         Moment at = kron.now();
-        rebaseSubtree(at);
-        this.segment = next;
-        recomputeEffective();
+        Map<Tempo, Long> before = new IdentityHashMap<>();
+        capture(at, before);
+        rebuildSubtree(at, before, next);
         kron.graph().invalidate(at);
+    }
+
+    /** Local time at {@code at} for this tempo and its whole subtree, under the maps that hold until now. */
+    private void capture(Moment at, Map<Tempo, Long> before) {
+        before.put(this, elapsedAt(at).nanos());
+        for (Tempo child : children) {
+            child.capture(at, before);
+        }
+    }
+
+    /** Rebuild top-down, so each tempo sees its parent's new map. Only this tempo gets a new segment. */
+    private void rebuildSubtree(Moment at, Map<Tempo, Long> before, Segment next) {
+        rebuild(at, before.get(this), next);
+        for (Tempo child : children) {
+            child.rebuildSubtree(at, before, null);
+        }
+    }
+
+    /**
+     * Re-anchor this tempo at {@code at}, where its local time must read {@code value}, under its parent's
+     * current map.
+     *
+     * <p>With {@code next}, that segment starts here. Without it, the current segment is kept and only its
+     * offset moves, so the parent's change cannot make local time jump; a glide that has already ended is
+     * settled into a hold of its end speed first. Then the two pieces are recomputed from the chain: the
+     * composed piece runs to the latest knot still ahead, and the flattened piece takes over from there,
+     * or from {@code at} when nothing is gliding.
+     */
+    private void rebuild(Moment at, long value, Segment next) {
+        long parentNow = parentLocal(at);
+        if (next != null) {
+            this.segment = next;
+            this.segmentStart = parentNow;
+            this.segmentOffset = value;
+        } else if (segment.extent() > 0 && parentNow - segmentStart >= segment.extent()) {
+            this.segment = new Segment.Hold(segment.endSpeed());
+            this.segmentStart = parentNow;
+            this.segmentOffset = value;
+        } else {
+            this.segmentOffset = value - segment.advance(parentNow - segmentStart);
+        }
+        this.effective = parent == null ? segment.endSpeed() : parent.effective.times(segment.endSpeed());
+
+        Moment knot = null;
+        if (segment.extent() > 0) {
+            long end = Math.addExact(segmentStart, segment.extent());
+            knot = parent == null ? new Moment(end) : parent.globalAt(new Dur(end));
+        }
+        if (parent != null && parent.composedUntil != null
+                && (knot == null || parent.composedUntil.isAfter(knot))) {
+            knot = parent.composedUntil;
+        }
+        if (knot != null && knot.isAfter(at)) {
+            this.composedUntil = knot;
+            this.tailStart = knot;
+            this.tailLocal = new Dur(composed(knot));
+        } else {
+            this.composedUntil = null;
+            this.tailStart = at;
+            this.tailLocal = new Dur(value);
+        }
+    }
+
+    /** The parent's local nanoseconds at {@code at}; global nanoseconds for the root. */
+    private long parentLocal(Moment at) {
+        return parent == null ? at.nanos() : parent.elapsedAt(at).nanos();
+    }
+
+    /** The composed piece: the parent's map, then this tempo's segment. */
+    private long composed(Moment at) {
+        return Math.addExact(segmentOffset, segment.advance(parentLocal(at) - segmentStart));
     }
 
     /**
@@ -277,19 +421,4 @@ public final class Tempo {
         return qr[1].signum() < 0 ? qr[0].subtract(BigInteger.ONE) : qr[0];
     }
 
-    private void rebaseSubtree(Moment at) {
-        Dur local = elapsedAt(at);
-        for (Tempo child : children) {
-            child.rebaseSubtree(at);
-        }
-        this.localAtOrigin = local;
-        this.globalOrigin = at;
-    }
-
-    private void recomputeEffective() {
-        this.effective = parent == null ? scale() : parent.effective.times(scale());
-        for (Tempo child : children) {
-            child.recomputeEffective();
-        }
-    }
 }

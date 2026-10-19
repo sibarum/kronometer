@@ -46,8 +46,8 @@ A tempo holds a sequence of **segments**, each in its parent's time. A segment i
 | `Linear(r0 → r1, T)` | straight line in speed | `r0·t + (r1 − r0)·t² / 2T` | root of a quadratic | yes, to the nanosecond, via integer arithmetic |
 | `Exponential(r0 → r1, T)` | constant ratio per unit time, which is how pitch and tempo are heard | `r0·T·(ρ^(t/T) − 1) / ln ρ`, with `ρ = r1/r0` | closed-form log | double precision within the segment; exact at its ends |
 
-**The knot rule.** Every segment ends on an exact `Ratio`, and the tempo rebases at that moment, exactly as
-`rescale` does today. So exactness is lost only inside a glide and comes back at its end. Sibling grids that
+**The knot rule.** Every segment ends on an exact `Ratio`, and from that moment the tempo converts through
+the flattened `Ratio` again. (As built, no rebase happens at the knot; see step 4 below.) So exactness is lost only inside a glide and comes back at its end. Sibling grids that
 are commensurate before a glide and after it still meet on the nanosecond. During a glide nothing is
 commensurate anyway, so nothing is lost.
 
@@ -186,8 +186,30 @@ Where the horizon gets consumed:
    the fix-up (200 000 cases, including the `BigInteger` path), the Galois pair over 100 random nested
    chains with rescales, grid lines read back as themselves in two inexact tempos, and 3:2 and 4:3
    still meeting at 72 ms. 214 tests green.
-4. **`Linear` glides**: the exact integral, the integer-square-root inverse, the composed (non-flattened)
-   path while any ancestor is mid-glide, and the knot rebase back to the flattened path.
+4. ~~**`Linear` glides**: the exact integral, the integer-square-root inverse, the composed (non-flattened)
+   path while any ancestor is mid-glide, and the knot rebase back to the flattened path.~~ **Done**, with
+   the knot handled differently from what this plan first said:
+   - **No event at the knot.** Each tempo's map from global time has at most two pieces, fixed when a
+     segment begins anywhere in its ancestry. The composed piece (the parent's map, then this tempo's
+     segment, anchored in parent-local time) runs until the latest knot in the chain. The flattened piece,
+     one exact `Ratio`, runs from there. A glide therefore ends without anything happening at its end, and a
+     prediction made before the knot is the value seen after it. A rebase at the knot would have shifted
+     rounding by a nanosecond and broken the "prediction is invisible" property.
+   - **A segment is defined for all parent time**, at its starting speed before its start and at its end
+     speed after its extent. A finished glide is settled into a `Hold` only at the next rebuild, which
+     changes no values.
+   - **A rebuild re-anchors by offset.** Old local times for the subtree are read first, then each tempo
+     keeps its segment and moves only its offset. So a parent's change cannot make a child jump, even where
+     composed and flattened rounding differ.
+   - **`r0` is a `BigInteger` fraction**, because a glide that replaces one in progress starts from the
+     exact speed reached, whose denominator carries the earlier extent. `r1` is a `Ratio`, per the knot
+     rule. `scale()` returns the speed being glided to.
+
+   `GlideTest` checks seven things: the exact integral, the rate across the knot and across a retarget,
+   2 ms grid spacing at 3:2 after a glide, a 2:1 child exactly doubling a gliding parent, the Galois pair
+   over 100 random chains of glides and rescales, and prediction on and off agreeing through glides for a
+   domain inside the tempo and one outside it. It also checks that the square-root candidate lands within
+   one nanosecond of the least moment. 222 tests green.
 5. **`Exponential` glides.**
 6. **Horizons**: `Tempo.horizon()` and `varyingUntil()` per the table, wired into `Cell` and
    `Predictor.collect`. Then `follow` and `live`.

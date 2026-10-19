@@ -124,7 +124,7 @@ class TempoMapTest {
         return Ratio.of(1 + random.nextInt(64), 1 + random.nextInt(64));
     }
 
-    private static void checkGalois(Tempo tempo, Moment now, Random random, long seed) {
+    static void checkGalois(Tempo tempo, Moment now, Random random, long seed) {
         for (int i = 0; i < 200; i++) {
             Moment g = now.plus(Dur.ns(random.nextLong(-1_000_000_000L, 10_000_000_000L)));
             Dur local = tempo.elapsedAt(g);
