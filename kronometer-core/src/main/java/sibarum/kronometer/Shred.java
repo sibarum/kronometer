@@ -47,6 +47,9 @@ public final class Shred {
     private long suspensionId;
     private boolean cancelRequested;
     private Trigger waitingOn;
+    /** Links in {@link #waitingOn}'s list of waiters; see {@link Trigger}. Null when not on one. */
+    Shred waitPrev;
+    Shred waitNext;
     private boolean wokenByTrigger;
     private Trigger done;
 
@@ -170,10 +173,6 @@ public final class Shred {
         children.add(child);
     }
 
-    boolean isWaitingOn(Trigger t) {
-        return state == State.WAITING && waitingOn == t;
-    }
-
     /** Start the carrier thread. It parks on the gate until the kernel hands it the baton. */
     void start() {
         thread = Thread.ofVirtual().name("shred-" + id).unstarted(this::run);
@@ -268,6 +267,9 @@ public final class Shred {
         kron.kernelGate().open();
         gate.await();
         state = State.RUNNING;
+        if (waitingOn != null && !wokenByTrigger) {
+            waitingOn.unlink(this);             // timed out or cancelled: still on the trigger's list
+        }
         waitingOn = null;
         checkCancelled();
     }

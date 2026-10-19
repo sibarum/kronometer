@@ -384,6 +384,10 @@ public final class Rate {
         return tick;
     }
 
+    Trigger retimed() {
+        return retimed;
+    }
+
     /**
      * The next moment this domain intends to be woken, for {@link Kron#slack()} and
      * {@link Kron#nextDeadline()}.

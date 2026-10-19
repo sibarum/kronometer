@@ -6,10 +6,12 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static sibarum.kronometer.Dur.hz;
 import static sibarum.kronometer.Dur.ms;
 import static sibarum.kronometer.Dur.s;
 import static sibarum.kronometer.Time.advance;
@@ -142,5 +144,93 @@ class TriggerTest {
             kron.run();
         }
         assertEquals(List.of("survived"), log);
+    }
+
+    @Test
+    @DisplayName("a timed-out wait leaves the trigger's waiter list, however many times it times out")
+    void timedOutWaitsDoNotAccumulate() {
+        try (Kron kron = Kron.virtual()) {
+            Trigger t = kron.trigger("t");
+            AtomicLong timeouts = new AtomicLong();
+            int[] most = {0};
+            kron.spork("poller", () -> {
+                for (int i = 0; i < 100_000; i++) {
+                    if (!await(t, ms(1))) {
+                        timeouts.incrementAndGet();
+                    }
+                    most[0] = Math.max(most[0], t.waiting());
+                }
+            });
+            kron.run();
+            // waiting() is the list's real length now, not a filtered count, so a leak shows here: the
+            // old lazily pruned queue held one entry per timeout, 100 000 of them by the end.
+            assertEquals(100_000, timeouts.get());
+            assertEquals(0, most[0]);
+            assertEquals(0, t.waiting());
+        }
+    }
+
+    @Test
+    @DisplayName("a wait cancelled while enrolled leaves the trigger's waiter list")
+    void cancelledWaitLeavesTheList() {
+        try (Kron kron = Kron.virtual()) {
+            Trigger t = kron.trigger("t");
+            Shred waiter = kron.spork("waiter", () -> await(t, s(10)));
+            kron.spork("canceller", () -> {
+                advance(ms(1));
+                log.add("enrolled " + t.waiting());
+                waiter.cancel();
+                advance(ms(1));
+                log.add("after cancel " + t.waiting());
+            });
+            kron.run();
+        }
+        assertEquals(List.of("enrolled 1", "after cancel 0"), log);
+    }
+
+    @Test
+    @DisplayName("a shred that timed out and waits again queues behind those who waited in between")
+    void reEnrolmentAfterTimeoutKeepsWaitOrder() {
+        try (Kron kron = Kron.virtual()) {
+            Trigger t = kron.trigger("t");
+            kron.spork("again", () -> {
+                await(t, ms(5));                    // times out at 5 ms
+                advance(ms(5));                     // "late" enrols in between, at 7 ms
+                await(t);                           // re-enrols at 10 ms
+                log.add("again");
+            });
+            kron.spork("late", () -> {
+                advance(ms(7));
+                await(t);
+                log.add("late");
+            });
+            kron.spork("firer", () -> {
+                advance(ms(20));
+                t.fire();
+                advance(ms(1));
+                t.fire();
+            });
+            kron.run();
+        }
+        // A stale entry from the timed-out wait would have put "again" first: it still matched the shred
+        // once the shred was waiting on the same trigger again.
+        assertEquals(List.of("late", "again"), log);
+    }
+
+    @Test
+    @DisplayName("a 48 kHz fixed domain under a 3:2 tempo keeps at most one waiter on its retimed trigger")
+    void fixedDomainRetimedStaysBounded() {
+        try (Kron kron = Kron.virtual()) {
+            Tempo tempo = kron.tempo().child(Ratio.of(3, 2));
+            Rate audio = tempo.fixed("audio", hz(48_000));
+            int[] most = {0};
+            audio.each(step -> most[0] = Math.max(most[0], audio.retimed().waiting()));
+            kron.runUntil(Moment.ORIGIN.plus(s(1)));
+            // Every step waits on retimed with the grid line as its timeout, and with no tempo change
+            // every one of those waits times out. Before the fix this held 72 002 entries here.
+            assertTrue(audio.steps() > 48_000, "steps " + audio.steps());
+            assertTrue(most[0] <= 1, "most waiters " + most[0]);
+            assertTrue(audio.retimed().waiting() <= 1, "waiters " + audio.retimed().waiting());
+        }
     }
 }

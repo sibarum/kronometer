@@ -1,8 +1,5 @@
 package sibarum.kronometer;
 
-import java.util.ArrayDeque;
-import java.util.Deque;
-
 /**
  * Something a shred can wait for. ChucK's event.
  *
@@ -13,12 +10,20 @@ import java.util.Deque;
  * <p>Named {@code Trigger} rather than {@code Signal} because {@code Signal} is spent on the reactive
  * supertype in M4, where the industry now expects it. This is the one place Kronometer's ChucK
  * lineage is obscured; see {@code docs/architecture.md} §15.2.
+ *
+ * <p>The waiters are an intrusive list threaded through the shreds themselves, which a shred can be on
+ * only one of at a time. A timed wait that times out, or is cancelled, unlinks itself in constant time
+ * when it resumes, so nothing stale is left behind. A queue pruned lazily leaked one entry per timed-out
+ * wait: a fixed-rate domain waits on its {@code retimed} trigger with a timeout once per step, so a
+ * constant tempo grew the queue by one reference per audio sample, forever.
  */
 public final class Trigger {
 
     private final Kron kron;
     private final String name;
-    private final Deque<Shred> waiters = new ArrayDeque<>();
+    private Shred head;
+    private Shred tail;
+    private int size;
 
     Trigger(Kron kron, String name) {
         this.kron = kron;
@@ -32,12 +37,10 @@ public final class Trigger {
     /** Wake the longest-waiting shred, if any. */
     public void fire() {
         kron.requireOnTimeline("fire()");
-        while (!waiters.isEmpty()) {
-            Shred s = waiters.poll();
-            if (s.isWaitingOn(this)) {
-                s.wakeFromTrigger();
-                return;
-            }
+        Shred s = head;
+        if (s != null) {
+            unlink(s);
+            s.wakeFromTrigger();
         }
     }
 
@@ -56,20 +59,47 @@ public final class Trigger {
      */
     void wakeAll() {
         Shred s;
-        while ((s = waiters.poll()) != null) {
-            if (s.isWaitingOn(this)) {
-                s.wakeFromTrigger();
-            }
+        while ((s = head) != null) {
+            unlink(s);
+            s.wakeFromTrigger();
         }
     }
 
-    /** How many shreds are waiting. Stale entries are pruned lazily, so this is an upper bound. */
+    /** How many shreds are waiting. */
     public int waiting() {
-        return (int) waiters.stream().filter(s -> s.isWaitingOn(this)).count();
+        return size;
     }
 
+    /** Append {@code s}, which must not be on any trigger's list. */
     void enrol(Shred s) {
-        waiters.add(s);
+        s.waitPrev = tail;
+        s.waitNext = null;
+        if (tail == null) {
+            head = s;
+        } else {
+            tail.waitNext = s;
+        }
+        tail = s;
+        size++;
+    }
+
+    /** Take {@code s} off the list, which it must be on. */
+    void unlink(Shred s) {
+        Shred prev = s.waitPrev;
+        Shred next = s.waitNext;
+        if (prev == null) {
+            head = next;
+        } else {
+            prev.waitNext = next;
+        }
+        if (next == null) {
+            tail = prev;
+        } else {
+            next.waitPrev = prev;
+        }
+        s.waitPrev = null;
+        s.waitNext = null;
+        size--;
     }
 
     @Override
