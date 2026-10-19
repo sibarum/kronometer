@@ -732,6 +732,17 @@ public final class Kron implements AutoCloseable {
         return domain;
     }
 
+    /**
+     * A tempo's map changed at now: every fixed domain works out its next grid line again. All of them rather
+     * than the changed subtree's, because a domain whose line did not move just waits again, in zero logical
+     * time, and knowing which tempos a domain hangs from is not worth a second registry.
+     */
+    void retimeDomains() {
+        for (Rate domain : domains) {
+            domain.retime();
+        }
+    }
+
     /** The domains registered on this runtime, in declaration order. */
     public List<Rate> domains() {
         return List.copyOf(domains);

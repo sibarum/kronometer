@@ -451,6 +451,7 @@ public final class Tempo {
         capture(at, before);
         rebuildSubtree(at, before, next);
         kron.graph().invalidate(at);
+        kron.retimeDomains();
     }
 
     /** Local time at {@code at} for this tempo and its whole subtree, under the maps that hold until now. */

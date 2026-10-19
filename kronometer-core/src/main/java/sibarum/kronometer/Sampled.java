@@ -66,8 +66,8 @@ public final class Sampled<T> {
         this.interp = interp;
     }
 
-    /** Called by the producing domain at the end of each of its steps. */
-    void commit(Moment at, Dur period) {
+    /** Called by the producing domain at the end of each step, with the global time the step covers. */
+    void commit(Moment at, Dur span) {
         T value = source.get();
         if (currentAt == null) {
             previous = value;
@@ -76,7 +76,7 @@ public final class Sampled<T> {
         }
         current = value;
         currentAt = at;
-        span = period;
+        this.span = span;
     }
 
     /** Whether anything has been committed yet. */

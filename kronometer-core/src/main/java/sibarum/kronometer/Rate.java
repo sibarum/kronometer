@@ -66,6 +66,8 @@ public final class Rate {
     private final Trigger tick;
     /** Fired when a handler is registered on a domain whose driver has parked for want of one. */
     private final Trigger resumed;
+    /** Fired when a tempo changes, so a domain waiting for a grid line works it out again. */
+    private final Trigger retimed;
 
     private Dur period;
     private int priority;
@@ -101,6 +103,7 @@ public final class Rate {
         this.tempo = tempo;
         this.tick = new Trigger(kron, name + ".tick");
         this.resumed = new Trigger(kron, name + ".resumed");
+        this.retimed = new Trigger(kron, name + ".retimed");
     }
 
     // ---------------------------------------------------------- configuration
@@ -310,8 +313,11 @@ public final class Rate {
                     h.accept(step);
                 }
                 completed++;
-                for (Sampled<?> sampled : samplers) {
-                    sampled.commit(step.at(), step.dt());
+                if (!samplers.isEmpty()) {
+                    Dur span = wallSpan(step);
+                    for (Sampled<?> sampled : samplers) {
+                        sampled.commit(step.at(), span);
+                    }
                 }
                 considerRateChange();
                 kron.predictor().fill(this, predictions);   // top the window back up
@@ -442,6 +448,22 @@ public final class Rate {
         return gridLine(n);
     }
 
+    /**
+     * How much <em>global</em> time {@code step} covers: from its grid line to the next. What a blend
+     * between steps is read across, since it is read at global moments.
+     *
+     * <p>Not {@code step.dt()}, which is the period in the domain's local time. The two agree only in a 1:1
+     * tempo; in a 1:4 tempo a 20 ms step is 80 ms of wall, and in a gliding one every step's wall span is
+     * different. Call it on the timeline, where the tempo's map is the one the step was placed by. A dynamic
+     * domain is wall-locked, so its {@code dt} already is the span.
+     */
+    Dur wallSpan(Step step) {
+        if (kind != Kind.FIXED) {
+            return step.dt();
+        }
+        return gridLine(step.index() + 1).since(step.at());
+    }
+
     /** The highest grid index at or before {@code at}. */
     long gridIndexAtOrBefore(Moment at) {
         if (originLocal == null) {
@@ -488,9 +510,39 @@ public final class Rate {
         }
 
         index++;
-        Moment target = gridLine(index);
-        Time.until(target);
-        return new Step(index, target, period, dropped);
+        Moment line = awaitGridLine(index);
+        return new Step(index, line, period, dropped);
+    }
+
+    /**
+     * Wait for grid line {@code n}, following the tempo if it changes during the wait.
+     *
+     * <p>The line is where the tempo's map puts it <em>now</em>, and a rescale or glide while waiting moves
+     * it: later when the tempo slows, earlier when it speeds up. A plain wait until the line as first worked
+     * out would fire a slowed step early and a sped-up one late, and that is what this used to do. So the wait
+     * is on {@link #retimed}, with the line as its timeout, and every tempo change fires it: the domain
+     * works the line out again and waits for that. A line that has already passed returns at once.
+     *
+     * @return the line as last worked out, so the step need not convert it again
+     */
+    private Moment awaitGridLine(long n) {
+        while (true) {
+            Moment target = gridLine(n);
+            Moment now = Time.now();
+            if (!target.isAfter(now)) {
+                return target;
+            }
+            if (!Time.await(retimed, target.since(now))) {
+                return target;                          // timed out: the line came, under an unchanged map
+            }
+        }
+    }
+
+    /** A tempo changed: wake a domain waiting for its next grid line so it works the line out again. */
+    void retime() {
+        if (kind == Kind.FIXED) {
+            retimed.wakeAll();
+        }
     }
 
     /** The next driven step: wait for the kernel to reach a tick boundary. */

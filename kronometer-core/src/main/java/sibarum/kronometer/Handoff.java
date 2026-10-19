@@ -45,14 +45,14 @@ public final class Handoff implements AutoCloseable {
 
     private final Rate domain;
     private final Consumer<Step> recorder = this::record;
-    private final ConcurrentLinkedQueue<Step> due = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<Due> due = new ConcurrentLinkedQueue<>();
     private final AtomicLong dropped = new AtomicLong();
 
     private volatile boolean held;
     private volatile boolean closed;
     private volatile Moment releasedAt;
 
-    // Owning thread only: the last step that ran, and how long it was.
+    // Owning thread only: the last step that ran, and how much global time it covers.
     private Moment lastRanAt;
     private Dur lastSpan = Dur.ZERO;
     private long ran;
@@ -73,8 +73,12 @@ public final class Handoff implements AutoCloseable {
             dropped.incrementAndGet();
             return;
         }
-        due.add(step);
+        // The span is taken here, on the timeline, because it needs the tempo's map; the owning thread only reads it.
+        due.add(new Due(step, domain.wallSpan(step)));
     }
+
+    /** A step that came due, with the global time it covers. See {@link Rate#wallSpan}. */
+    private record Due(Step step, Dur span) { }
 
     /**
      * Runs every step that has come due since the last drain, in order, on the calling thread.
@@ -84,10 +88,10 @@ public final class Handoff implements AutoCloseable {
     public int drain(Consumer<Step> work) {
         Objects.requireNonNull(work, "work");
         int count = 0;
-        for (Step step = due.poll(); step != null; step = due.poll()) {
-            work.accept(step);
-            lastRanAt = step.at();
-            lastSpan = step.dt();
+        for (Due next = due.poll(); next != null; next = due.poll()) {
+            work.accept(next.step());
+            lastRanAt = next.step().at();
+            lastSpan = next.span();
             ran++;
             count++;
         }
