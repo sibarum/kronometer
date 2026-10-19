@@ -1,5 +1,6 @@
 package sibarum.kronometer;
 
+import java.math.BigInteger;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -109,15 +110,36 @@ public final class Tempo {
         return elapsedAt(kron.now());
     }
 
-    /** How much local time has elapsed in this tempo as of {@code global}. */
+    /**
+     * How much local time has elapsed in this tempo as of {@code global}, rounded down to the nanosecond:
+     * a local instant counts as reached only once it has fully elapsed. See {@link #floorScaled}.
+     */
     public Dur elapsedAt(Moment global) {
-        return localAtOrigin.plus(effective.scale(global.since(globalOrigin)));
+        return localAtOrigin.plus(new Dur(floorScaled(effective, global.since(globalOrigin).nanos())));
     }
 
-    /** The global moment at which this tempo's local clock reads {@code localElapsed}. */
+    /**
+     * The global moment at which this tempo's local clock reads {@code localElapsed}: the <b>least</b>
+     * moment {@code g} with {@code elapsedAt(g) >= localElapsed}.
+     *
+     * <p>Defined that way rather than as the rounded inverse, because the two directions must agree to
+     * the nanosecond. A {@link Rate} places grid line {@code n} with this method and finds the line at or
+     * before a moment with {@link #elapsedAt}; if the rounded inverse lands one nanosecond early, the line
+     * reads as line {@code n − 1} and a step runs twice. With this definition both of these hold for every
+     * input:
+     *
+     * <ul>
+     *   <li>{@code elapsedAt(globalAt(L)) >= L}</li>
+     *   <li>{@code globalAt(elapsedAt(g)) <= g}</li>
+     * </ul>
+     *
+     * <p>Where the scale divides exactly, this is the exact moment, as before. Elsewhere it is the exact
+     * moment rounded up to the next nanosecond, where the rounded inverse used to round to nearest.
+     */
     public Moment globalAt(Dur localElapsed) {
-        Dur fromOrigin = localElapsed.minus(localAtOrigin);
-        return globalOrigin.plus(effective.reciprocal().scale(fromOrigin));
+        long target = localElapsed.minus(localAtOrigin).nanos();
+        long fromOrigin = leastReaching(effective, target);
+        return globalOrigin.plus(new Dur(fromOrigin));
     }
 
     /** A local duration, expressed in global time. */
@@ -191,6 +213,68 @@ public final class Tempo {
         this.segment = next;
         recomputeEffective();
         kron.graph().invalidate(at);
+    }
+
+    /**
+     * {@code floor(d · num / den)}: one affine segment's forward map, rounded <b>down</b>.
+     *
+     * <p>Down, not to nearest, because the inverse is "the least moment that reaches it". Under rounding to
+     * nearest, a 1:4 tempo reaches local 20 ms two nanoseconds before global 80 ms, because 79 999 998 ns
+     * already rounds up to it, and an exact grid would land early. Rounding down means a local instant is
+     * reached only once it has fully elapsed, so wherever the scale divides exactly the inverse is the exact
+     * moment, and only the inexact cases round, by less than one nanosecond.
+     */
+    static long floorScaled(Ratio scale, long d) {
+        if (scale.isOne()) {
+            return d;
+        }
+        try {
+            return Math.floorDiv(Math.multiplyExact(d, scale.num()), scale.den());
+        } catch (ArithmeticException overflow) {
+            return floorDiv(BigInteger.valueOf(d).multiply(BigInteger.valueOf(scale.num())),
+                    BigInteger.valueOf(scale.den())).longValueExact();
+        }
+    }
+
+    /**
+     * The least {@code d} with {@code floorScaled(scale, d) >= target}: the inverse of one affine segment,
+     * in the sense {@link #globalAt} needs.
+     *
+     * <p>{@code floor(d·num/den) >= k} holds exactly when {@code d·num/den >= k}, so the candidate is
+     * {@code ceil(k·den/num)} in closed form ({@link #closedFormReaching}). The fix-up loops then check it
+     * against the forward map itself, so the answer is right by construction even if the closed form is
+     * not; they run zero times when it is, which the property test asserts by comparing the two. A glide's
+     * inverse will be inexact (a square root, a logarithm), and the same fix-up is what will make that one
+     * right.
+     */
+    static long leastReaching(Ratio scale, long target) {
+        long d = closedFormReaching(scale, target);
+        while (floorScaled(scale, d) < target) {
+            d++;
+        }
+        while (floorScaled(scale, d - 1) >= target) {
+            d--;
+        }
+        return d;
+    }
+
+    /** The closed-form candidate for {@link #leastReaching}, before any fix-up. */
+    static long closedFormReaching(Ratio scale, long target) {
+        if (scale.isOne()) {
+            return target;
+        }
+        try {
+            return Math.ceilDiv(Math.multiplyExact(target, scale.den()), scale.num());
+        } catch (ArithmeticException overflow) {
+            BigInteger numerator = BigInteger.valueOf(target).multiply(BigInteger.valueOf(scale.den()));
+            BigInteger divisor = BigInteger.valueOf(scale.num());
+            return floorDiv(numerator.add(divisor).subtract(BigInteger.ONE), divisor).longValueExact();
+        }
+    }
+
+    private static BigInteger floorDiv(BigInteger a, BigInteger b) {
+        BigInteger[] qr = a.divideAndRemainder(b);
+        return qr[1].signum() < 0 ? qr[0].subtract(BigInteger.ONE) : qr[0];
     }
 
     private void rebaseSubtree(Moment at) {

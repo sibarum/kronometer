@@ -178,9 +178,14 @@ Where the horizon gets consumed:
    `Tempo.scale()` switches over it, so adding a glide will not compile until `scale()` handles it.
    `rescale` calls `begin(next)`, which rebases, swaps the segment and invalidates. No behaviour change: 210
    tests green.
-3. **Galois-pair conversion**: define `globalAt` as the least moment and add the fix-up step. Add the
-   property test over random affine chains now, so it already guards `Hold` before anything non-affine
-   exists.
+3. ~~**Galois-pair conversion**: define `globalAt` as the least moment and add the fix-up step.~~ **Done**,
+   with one change of design that the tests forced: `elapsedAt` now rounds **down** instead of to nearest.
+   With rounding to nearest, the least moment in a 1:4 tempo that reaches local 20 ms is 79 999 998 ns, so
+   exact grids landed 2 ns early. Floor forward and ceiling back keep every exact case exact, and only
+   inexact ones round, by under a nanosecond. `TempoMapTest` covers four things: the closed form against
+   the fix-up (200 000 cases, including the `BigInteger` path), the Galois pair over 100 random nested
+   chains with rescales, grid lines read back as themselves in two inexact tempos, and 3:2 and 4:3
+   still meeting at 72 ms. 214 tests green.
 4. **`Linear` glides**: the exact integral, the integer-square-root inverse, the composed (non-flattened)
    path while any ancestor is mid-glide, and the knot rebase back to the flattened path.
 5. **`Exponential` glides.**
