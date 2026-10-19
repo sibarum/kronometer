@@ -42,8 +42,8 @@ public final class Tempo {
     private final Tempo parent;
     private final List<Tempo> children = new CopyOnWriteArrayList<>();
 
-    /** Scale relative to the parent: local time per parent time. */
-    private Ratio scale;
+    /** The current stretch of speed relative to the parent: local time per parent time. */
+    private Segment segment;
     /** Scale relative to the root, cached: {@code parent.effective × scale}. */
     private Ratio effective;
     /** The global moment at which this tempo's local clock read {@link #localAtOrigin}. */
@@ -55,7 +55,7 @@ public final class Tempo {
         this.kron = kron;
         this.name = name;
         this.parent = parent;
-        this.scale = scale;
+        this.segment = new Segment.Hold(scale);
         this.effective = parent == null ? scale : parent.effective.times(scale);
         this.globalOrigin = globalOrigin;
         this.localAtOrigin = Dur.ZERO;
@@ -81,7 +81,9 @@ public final class Tempo {
 
     /** This tempo's rate relative to its parent. */
     public Ratio scale() {
-        return scale;
+        return switch (segment) {
+            case Segment.Hold hold -> hold.speed();
+        };
     }
 
     /** This tempo's rate relative to the root — the product of every scale on the way up. */
@@ -137,15 +139,10 @@ public final class Tempo {
      */
     public void rescale(Ratio newScale) {
         Objects.requireNonNull(newScale, "newScale");
-        if (newScale.equals(scale)) {
+        if (segment instanceof Segment.Hold hold && hold.speed().equals(newScale)) {
             return;
         }
-        kron.requireOnTimeline("rescale()");
-        Moment at = kron.now();
-        rebaseSubtree(at);
-        this.scale = newScale;
-        recomputeEffective();
-        kron.graph().invalidate(at);
+        begin("rescale()", new Segment.Hold(newScale));
     }
 
     /**
@@ -175,10 +172,26 @@ public final class Tempo {
 
     @Override
     public String toString() {
-        return "Tempo(" + name + ", " + scale + " local, " + effective + " global)";
+        return "Tempo(" + name + ", " + scale() + " local, " + effective + " global)";
     }
 
     // -------------------------------------------------------------- internals
+
+    /**
+     * End the current segment at now and start {@code next}.
+     *
+     * <p>The subtree is rebased first, so the segment that ends is folded into the origins and local time
+     * is continuous across the change; then everything predicted beyond now is retracted, because the map
+     * it was computed through no longer holds.
+     */
+    private void begin(String operation, Segment next) {
+        kron.requireOnTimeline(operation);
+        Moment at = kron.now();
+        rebaseSubtree(at);
+        this.segment = next;
+        recomputeEffective();
+        kron.graph().invalidate(at);
+    }
 
     private void rebaseSubtree(Moment at) {
         Dur local = elapsedAt(at);
@@ -190,7 +203,7 @@ public final class Tempo {
     }
 
     private void recomputeEffective() {
-        this.effective = parent == null ? scale : parent.effective.times(scale);
+        this.effective = parent == null ? scale() : parent.effective.times(scale());
         for (Tempo child : children) {
             child.recomputeEffective();
         }

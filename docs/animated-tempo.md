@@ -173,9 +173,11 @@ Where the horizon gets consumed:
 
 1. **The step-0 bug**: a failing test for a predicted driven cell across `rescale`, then derive `curveEnd`
    from the tempo on each call.
-2. **A segment model inside `Tempo`**, with only `Hold`, and `rescale` re-expressed as "end the current
-   segment, start a `Hold`". No behaviour change; the existing eight `TempoTest`s and `PrecomputeTest` stay
-   green.
+2. ~~**A segment model inside `Tempo`**, with only `Hold`, and `rescale` re-expressed as "end the current
+   segment, start a `Hold`".~~ **Done.** `Segment` is a sealed interface whose only member is `Hold`.
+   `Tempo.scale()` switches over it, so adding a glide will not compile until `scale()` handles it.
+   `rescale` calls `begin(next)`, which rebases, swaps the segment and invalidates. No behaviour change: 210
+   tests green.
 3. **Galois-pair conversion**: define `globalAt` as the least moment and add the fix-up step. Add the
    property test over random affine chains now, so it already guards `Hold` before anything non-affine
    exists.
