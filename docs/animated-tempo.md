@@ -228,8 +228,28 @@ Where the horizon gets consumed:
    also check 2 ms grid spacing after an exponential glide to 3:2, and that the `log1p` candidate is within
    1 ns of the least moment. The random Galois and prediction-invisibility tests now mix both shapes.
    227 tests green.
-6. **Horizons**: `Tempo.horizon()` and `varyingUntil()` per the table, wired into `Cell` and
-   `Predictor.collect`. Then `follow` and `live`.
+6. ~~**Horizons**: `Tempo.horizon()` and `varyingUntil()` per the table, wired into `Cell` and
+   `Predictor.collect`. Then `follow` and `live`.~~ **Done**, with three changes from §6:
+   - **A held cell keeps `FOREVER`.** Its value does not depend on how fast its tempo runs, so only a
+     *driven* cell takes its tempo's horizon, and only until its curve ends. An end already passed cannot
+     move, since the map is continuous at now.
+   - **`follow(source, slew)` takes an explicit slew** rather than defaulting to a domain's step. It is a
+     reactive effect, so it sees changes that invalidate the graph (an input adapter's `set()`), not a
+     source that varies along a curve; `glide` is for speeds known in advance.
+   - **`release()`** clears `live` and stops following. Rescale and glide do not clear `live` (the
+     same promise-about-behaviour rule as `Cell.set`), but they do stop following.
+
+   `Rate.tempo()` is now public, and `Predictor.collect` caps the fill window at the domain's tempo
+   horizon as well as the signal's. `TempoHorizonTest` checks the table and these cases:
+   - a driven cell in a live tempo is not predicted, but in a gliding one it is;
+   - a held cell in a live tempo is still predicted;
+   - a domain in a live tempo is not filled ahead even for a knowable signal;
+   - `follow` gives continuous speed, and an explicit glide stops it;
+   - prediction on and off agree with a followed tempo and a live one rescaled per event.
+
+   Undoing either piece of wiring makes its test fail. Without them, the prediction-invisibility test still
+   passed, because retraction made the over-eager prediction wasted work rather than wrong output.
+   234 tests green.
 7. **`Tempo.time()`**, plus a note in `consumer-notes.md` on building faizuray's phase over it.
 8. **Audit and measure**: `Dilated`, `Handoff`, and `gridLine` cost under a glide against the affine path.
    That is a `kronometer-bench` entry with a gate, at 48 kHz in a gliding tempo.

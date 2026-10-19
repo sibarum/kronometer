@@ -72,6 +72,17 @@ public final class Tempo {
     private Moment tailStart;
     /** Local elapsed time at {@link #tailStart}. */
     private Dur tailLocal;
+    /** Where this tempo's own glide settles, in global time; {@code null} while it holds. */
+    private Moment ownKnot;
+
+    /** Declared volatile by {@link #live}: its speed changes at unpredictable times. */
+    private boolean live;
+    /** The signal this tempo's speed follows, or {@code null}. See {@link #follow}. */
+    private Signal<Ratio> followed;
+    /** The reactive effect that turns each change of {@link #followed} into a glide. */
+    private Effect follower;
+    /** The speed {@link #follower} last glided to, so a re-run that changes nothing does nothing. */
+    private Ratio followTarget;
 
     Tempo(Kron kron, String name, Tempo parent, Ratio scale, Moment globalOrigin) {
         this.kron = kron;
@@ -198,6 +209,7 @@ public final class Tempo {
      */
     public void rescale(Ratio newScale) {
         Objects.requireNonNull(newScale, "newScale");
+        stopFollowing();
         if (segment instanceof Segment.Hold hold && hold.speed().equals(newScale)) {
             return;
         }
@@ -225,6 +237,81 @@ public final class Tempo {
      * the subtree is predictable through all of it.
      */
     public void glide(Ratio to, Dur over, Glide shape) {
+        stopFollowing();
+        glideTo(to, over, shape);
+    }
+
+    /**
+     * Declare that this tempo's speed is changed from outside at unpredictable times, so none of its
+     * future may be assumed: a scrub control calling {@link #rescale} or {@link #glide} per event.
+     *
+     * <p>Collapses {@link #horizon()} to {@code now} for this tempo and every tempo nested in it, so
+     * nothing whose value depends on their time is computed ahead. Like {@link Cell#live}, it is a promise
+     * about behaviour: rescaling or gliding does not undo it. {@link #release} does.
+     */
+    public Tempo live() {
+        kron.requireOnTimeline("Tempo.live()");
+        stopFollowing();
+        this.live = true;
+        kron.graph().invalidate(kron.now());
+        return this;
+    }
+
+    /**
+     * Take this tempo's speed from {@code source}: each time it changes, glide to the new value over
+     * {@code slew} of parent time, so a stepped input still gives a continuous speed.
+     *
+     * <p>A change is noticed when something invalidates the graph, which is what an input adapter's
+     * {@link Cell#set} does; a source that varies continuously along a curve is not sampled between
+     * invalidations. Use {@link #glide} for a speed that is known in advance.
+     *
+     * <p>{@link #horizon()} becomes the source's: forever for a source that is merely held, since a write
+     * to it retracts what was predicted, and {@code now} for a {@linkplain Cell#live live} one. An explicit
+     * {@link #rescale}, {@link #glide}, {@link #live} or {@link #release} stops following.
+     */
+    public Tempo follow(Signal<Ratio> source, Dur slew) {
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(slew, "slew");
+        if (slew.nanos() <= 0) {
+            throw new IllegalArgumentException("a follow needs a positive slew: " + slew);
+        }
+        kron.requireOnTimeline("Tempo.follow()");
+        stopFollowing();
+        this.live = false;
+        this.followed = source;
+        this.followTarget = null;
+        this.follower = kron.effect("follow:" + name, () -> {
+            Ratio target = source.get();
+            if (!target.equals(followTarget)) {
+                followTarget = target;
+                glideTo(target, slew, Glide.LINEAR);
+            }
+        });
+        return this;
+    }
+
+    /** Stop following and stop being live: the speed holds or glides as it is, and is predictable again. */
+    public Tempo release() {
+        kron.requireOnTimeline("Tempo.release()");
+        boolean wasVolatile = live || followed != null;
+        stopFollowing();
+        this.live = false;
+        if (wasVolatile) {
+            kron.graph().invalidate(kron.now());
+        }
+        return this;
+    }
+
+    private void stopFollowing() {
+        if (follower != null) {
+            follower.cancel();
+            follower = null;
+        }
+        followed = null;
+        followTarget = null;
+    }
+
+    private void glideTo(Ratio to, Dur over, Glide shape) {
         Objects.requireNonNull(to, "to");
         Objects.requireNonNull(over, "over");
         Objects.requireNonNull(shape, "shape");
@@ -256,15 +343,47 @@ public final class Tempo {
     }
 
     /**
-     * How far ahead this tempo's local-to-global mapping is knowable.
+     * How far ahead this tempo's local-to-global map is <b>determined</b>: the minimum over this tempo and
+     * every ancestor.
      *
-     * <p>{@link Dur#FOREVER} for a constant scale, since the map is then affine and exact forever. A
-     * discrete rescale retracts predictions when it happens rather than being foreseen, so it does not
-     * shorten the horizon in advance; an <em>animated</em> scale would, and that arrives in M5 along
-     * with the integration it requires.
+     * <ul>
+     *   <li>Holding or gliding: {@link Moment#FOREVER}. A glide is pure, and a later rescale or glide
+     *       retracts what was predicted before any effect can act on it, so this is optimistic in the same
+     *       sound way a held {@link Cell} is.</li>
+     *   <li>{@linkplain #follow Following} a signal: that signal's horizon.</li>
+     *   <li>{@linkplain #live Live}: {@code now}. You cannot render ahead through a time warp somebody is
+     *       dragging.</li>
+     * </ul>
      */
     public Moment horizon() {
-        return Moment.FOREVER;
+        Moment own = live ? kron.now() : followed != null ? followed.horizon() : Moment.FOREVER;
+        if (parent == null) {
+            return own;
+        }
+        Moment inherited = parent.horizon();
+        return inherited.isBefore(own) ? inherited : own;
+    }
+
+    /**
+     * How far this tempo's speed is still <b>changing</b>: the maximum over this tempo and every ancestor
+     * of where a glide settles and how long a followed signal varies, and {@code now} when nothing does.
+     */
+    public Moment varyingUntil() {
+        Moment now = kron.now();
+        Moment own = ownKnot != null && ownKnot.isAfter(now) ? ownKnot : now;
+        if (followed != null && followed.varyingUntil().isAfter(own)) {
+            own = followed.varyingUntil();
+        }
+        if (parent == null) {
+            return own;
+        }
+        Moment inherited = parent.varyingUntil();
+        return inherited.isAfter(own) ? inherited : own;
+    }
+
+    /** Whether this tempo, or one it is nested in, has been declared {@linkplain #live live}. */
+    public boolean isLive() {
+        return live || (parent != null && parent.isLive());
     }
 
     @Override
@@ -336,6 +455,7 @@ public final class Tempo {
             long end = Math.addExact(segmentStart, segment.extent());
             knot = parent == null ? new Moment(end) : parent.globalAt(new Dur(end));
         }
+        this.ownKnot = knot;
         if (parent != null && parent.composedUntil != null
                 && (knot == null || parent.composedUntil.isAfter(knot))) {
             knot = parent.composedUntil;

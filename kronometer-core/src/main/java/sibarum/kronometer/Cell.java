@@ -179,14 +179,19 @@ public final class Cell<T> implements Signal<T> {
     /**
      * How far this cell's value is <b>determined</b>.
      *
-     * <p>A driven cell is determined forever, not merely until its curve ends: the curve covers the next
-     * stretch and the final value holds after it. Only {@link #live()} genuinely bounds this, which is
-     * the point — prediction is blocked by declared volatility, not by an animation finishing.
+     * <p>A driven cell is determined as far as its tempo is, not merely until its curve ends: the curve
+     * covers the next stretch and the final value holds after it. Only declared volatility bounds this,
+     * the cell's own {@link #live()} or its tempo's {@link Tempo#live()}, which is the point: prediction
+     * is blocked by volatility, not by an animation finishing.
      */
     @Override
     public Moment horizon() {
         return switch (mode) {
-            case HELD, DRIVEN -> Moment.FOREVER;
+            case HELD -> Moment.FOREVER;
+            // A curve is read through its tempo's map, so it is known only as far as the map is. Once the
+            // curve has ended the value is its last one whatever the tempo does, since the map is
+            // continuous at now and an end already passed cannot move.
+            case DRIVEN -> curveEnd().isAfter(kron.now()) ? tempo.horizon() : Moment.FOREVER;
             case LIVE -> kron.now();
             case FOLLOWING -> source.horizon();
         };

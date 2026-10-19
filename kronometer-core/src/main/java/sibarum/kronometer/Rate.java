@@ -201,6 +201,11 @@ public final class Rate {
         return lookahead;
     }
 
+    /** The tempo this domain's period is declared in. The root tempo for a dynamic domain. */
+    public Tempo tempo() {
+        return tempo;
+    }
+
     /**
      * How many steps this domain has completed.
      *

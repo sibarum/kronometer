@@ -115,6 +115,12 @@ final class Predictor {
         }
         Signal<T> signal = prediction.signal();
         Moment horizon = signal.horizon();
+        // The domain's own grid lines are placed through its tempo's map, so they are known only as far as
+        // that map is: a domain in a live tempo cannot be filled ahead whatever its signals say.
+        Moment gridHorizon = domain.tempo().horizon();
+        if (gridHorizon.isBefore(horizon)) {
+            horizon = gridHorizon;
+        }
         if (!horizon.isAfter(now)) {
             return;                                  // volatile: nothing about its future is knowable
         }
