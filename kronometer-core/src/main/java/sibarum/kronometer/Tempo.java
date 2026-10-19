@@ -106,6 +106,7 @@ public final class Tempo {
         return switch (segment) {
             case Segment.Hold hold -> hold.speed();
             case Segment.Linear glide -> glide.endSpeed();
+            case Segment.Exponential glide -> glide.endSpeed();
         };
     }
 
@@ -204,40 +205,41 @@ public final class Tempo {
     }
 
     /**
-     * Change this tempo's rate gradually: from whatever it is now to {@code to}, in a straight line, over
-     * {@code over} of the <em>parent's</em> time, and then hold {@code to}.
+     * Change this tempo's rate gradually, in a straight line: from whatever it is now to {@code to}, over
+     * {@code over} of the <em>parent's</em> time, and then hold {@code to}. {@link Glide#LINEAR}.
+     */
+    public void glide(Ratio to, Dur over) {
+        glide(to, over, Glide.LINEAR);
+    }
+
+    /**
+     * Change this tempo's rate gradually: from whatever it is now to {@code to}, over {@code over} of the
+     * <em>parent's</em> time, in the given {@code shape}, and then hold {@code to}.
      *
      * <p>Speed is continuous, so local time is continuous with a continuous rate: a glide that replaces
-     * one in progress starts from the exact speed the old one had reached. Local time is the exact integral
-     * of that speed, rounded down to the nanosecond, and once the glide ends the tempo converts through one
-     * exact {@link Ratio} again, so grids that were commensurate line up again.
+     * one in progress starts from the speed the old one had reached. Local time is the integral of that
+     * speed, rounded down to the nanosecond, and once the glide ends the tempo converts through one exact
+     * {@link Ratio} again, so grids that were commensurate line up again.
      *
      * <p>Like {@link #rescale}, this retracts everything predicted beyond now. The glide itself is pure, so
      * the subtree is predictable through all of it.
      */
-    public void glide(Ratio to, Dur over) {
+    public void glide(Ratio to, Dur over, Glide shape) {
         Objects.requireNonNull(to, "to");
         Objects.requireNonNull(over, "over");
+        Objects.requireNonNull(shape, "shape");
         if (over.nanos() <= 0) {
             throw new IllegalArgumentException("a glide needs a positive duration: " + over);
         }
         kron.requireOnTimeline("glide()");
-        long elapsed = parentLocal(kron.now()) - segmentStart;
-        Segment next = switch (segment) {
-            case Segment.Hold hold -> {
-                if (hold.speed().equals(to)) {
-                    yield null;
-                }
-                yield Segment.Linear.between(hold.speed(), to, over.nanos());
-            }
-            case Segment.Linear glide -> {
-                BigInteger[] from = glide.speedAt(elapsed);
-                yield new Segment.Linear(from[0], from[1], to, over.nanos());
-            }
-        };
-        if (next != null) {
-            begin("glide()", next);
+        if (segment instanceof Segment.Hold hold && hold.speed().equals(to)) {
+            return;                                     // already there: a glide would be a hold
         }
+        BigInteger[] from = segment.speedAt(parentLocal(kron.now()) - segmentStart);
+        begin("glide()", switch (shape) {
+            case LINEAR -> new Segment.Linear(from[0], from[1], to, over.nanos());
+            case EXPONENTIAL -> new Segment.Exponential(from[0], from[1], to, over.nanos());
+        });
     }
 
     /**

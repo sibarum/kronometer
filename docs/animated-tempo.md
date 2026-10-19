@@ -210,7 +210,24 @@ Where the horizon gets consumed:
    over 100 random chains of glides and rescales, and prediction on and off agreeing through glides for a
    domain inside the tempo and one outside it. It also checks that the square-root candidate lands within
    one nanosecond of the least moment. 222 tests green.
-5. **`Exponential` glides.**
+5. ~~**`Exponential` glides.**~~ **Done.** `tempo.glide(to, over, Glide.EXPONENTIAL)`, with the public
+   `Glide` enum (`LINEAR`, `EXPONENTIAL`) choosing the shape; `glide(to, over)` stays linear.
+   - **During the glide**, the integral is computed in `double` with `StrictMath.expm1`, and the inverse
+     with `log1p`. `StrictMath` gives the same bits on every platform and under native-image.
+   - **At the end**, the local time it reaches is fixed once as a whole nanosecond, and an exact `Ratio`
+     hold follows. So nothing inexact outlives the glide.
+   - **Retargeting:** every segment now reports `speedAt` as an exact fraction, so `glide()` retargets from
+     any shape to any shape. Mid-way through an exponential glide that fraction is the exact value of the
+     nearest `double`, so a retarget is continuous to about one part in 10¹⁶, not exactly.
+   - **Monotone in practice:** the integral is accurate to about a millionth of a nanosecond, while local
+     time grows by at least the slower speed every nanosecond. So rounding cannot step it backwards at any
+     speed this side of a millionth. That is argued, not proven; a test checks it over 200 random glides.
+
+   Tests check three things: the speed is the geometric mean halfway, the end lands within 1 ns of
+   `D·(ρ − 1)/ln ρ`, and the rate stays continuous across exponential→linear→exponential retargets. They
+   also check 2 ms grid spacing after an exponential glide to 3:2, and that the `log1p` candidate is within
+   1 ns of the least moment. The random Galois and prediction-invisibility tests now mix both shapes.
+   227 tests green.
 6. **Horizons**: `Tempo.horizon()` and `varyingUntil()` per the table, wired into `Cell` and
    `Predictor.collect`. Then `follow` and `live`.
 7. **`Tempo.time()`**, plus a note in `consumer-notes.md` on building faizuray's phase over it.

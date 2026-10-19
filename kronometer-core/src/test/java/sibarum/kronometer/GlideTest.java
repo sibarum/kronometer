@@ -140,7 +140,8 @@ class GlideTest {
                         if (random.nextInt(3) == 0) {
                             target.rescale(smallRatio(random));
                         } else {
-                            target.glide(smallRatio(random), Dur.ns(random.nextLong(1_000, 100_000_000)));
+                            target.glide(smallRatio(random), Dur.ns(random.nextLong(1_000, 100_000_000)),
+                                    random.nextBoolean() ? Glide.LINEAR : Glide.EXPONENTIAL);
                         }
                         for (Tempo t : chain) {
                             TempoMapTest.checkGalois(t, kron.now(), random, chainSeed);
@@ -179,7 +180,8 @@ class GlideTest {
                 for (int i = 0; i < 4; i++) {
                     Time.advance(ms(5 + random.nextInt(40)));
                     tempo.glide(Ratio.of(1 + random.nextInt(4), 1 + random.nextInt(4)),
-                            ms(1 + random.nextInt(80)));
+                            ms(1 + random.nextInt(80)),
+                            random.nextBoolean() ? Glide.LINEAR : Glide.EXPONENTIAL);
                 }
             });
             kron.effect(outside, () -> observed.add("out " + Time.now() + " " + shown.get()));
@@ -209,6 +211,105 @@ class GlideTest {
             }
         }
         assertTrue(moved < 200, "the fix-up moved " + moved + " of 20 000 candidates");
+    }
+
+    // ------------------------------------------------------- exponential
+
+    @Test
+    @DisplayName("an exponential glide is at the geometric mean halfway, and lands on its closed form")
+    void exponentialIsEvenInLogSpeed() {
+        try (Kron kron = Kron.virtual()) {
+            Tempo tempo = kron.tempo().child(Ratio.ONE);
+            kron.spork(() -> tempo.glide(Ratio.of(4, 1), s(1), Glide.EXPONENTIAL));
+            kron.run();
+
+            long halfway = rate(tempo, at(ms(500)), at(ms(500)).plus(us(1)));
+            assertTrue(Math.abs(halfway - 2_000) <= 1, "speed halfway from 1 to 4 should be 2, was " + halfway);
+
+            // I(D) = D·(ρ − 1) / ln ρ, with ρ = 4.
+            long expected = (long) Math.floor(1e9 * 3 / Math.log(4));
+            long atEnd = tempo.elapsedAt(at(s(1))).nanos();
+            assertTrue(Math.abs(atEnd - expected) <= 1, "end of glide: " + atEnd + " vs " + expected);
+            assertEquals(atEnd + 4_000_000_000L, tempo.elapsedAt(at(s(2))).nanos(), "exactly 4:1 after it");
+        }
+    }
+
+    @Test
+    @DisplayName("the rate is continuous where an exponential glide ends, and where shapes replace each other")
+    void exponentialRateIsContinuous() {
+        try (Kron kron = Kron.virtual()) {
+            Tempo tempo = kron.tempo().child(Ratio.ONE);
+            kron.spork(() -> {
+                tempo.glide(Ratio.of(4, 1), s(1), Glide.EXPONENTIAL);
+                Time.advance(ms(500));
+                tempo.glide(Ratio.ONE, ms(500), Glide.LINEAR);        // from 2, down in a straight line
+                Time.advance(ms(250));
+                tempo.glide(Ratio.of(3, 1), ms(500), Glide.EXPONENTIAL);   // from 1.5, up again
+            });
+            kron.run();
+
+            for (Moment change : List.of(at(ms(500)), at(ms(750)), at(ms(1_250)))) {
+                long before = rate(tempo, change.minus(us(1)), change);
+                long after = rate(tempo, change, change.plus(us(1)));
+                assertTrue(Math.abs(after - before) <= 2,
+                        "rate jumped from " + before + " to " + after + " at " + change);
+            }
+            assertEquals(3_000, rate(tempo, at(s(2)), at(s(2)).plus(us(1))));
+        }
+    }
+
+    @Test
+    @DisplayName("after an exponential glide, a grid in the tempo is exact again")
+    void exactnessReturnsAfterAnExponentialGlide() {
+        List<Moment> steps = new ArrayList<>();
+        try (Kron kron = Kron.virtual()) {
+            Tempo tempo = kron.tempo().child(Ratio.ONE);
+            Rate grid = tempo.fixed("grid", ms(3));
+            grid.each(step -> steps.add(step.at()));
+            kron.spork(() -> tempo.glide(Ratio.of(3, 2), ms(100), Glide.EXPONENTIAL));
+            kron.runUntil(at(ms(400)));
+        }
+        int checked = 0;
+        for (int i = 1; i < steps.size(); i++) {
+            if (steps.get(i - 1).isAfter(at(ms(100)))) {
+                assertEquals(ms(2).nanos(), steps.get(i).since(steps.get(i - 1)).nanos());
+                checked++;
+            }
+        }
+        assertTrue(checked > 100, "the grid should keep stepping: " + checked);
+    }
+
+    @Test
+    @DisplayName("an exponential glide's log1p inverse is within a nanosecond of the least moment, before fix-up")
+    void exponentialInverseIsTight() {
+        Random random = new Random(11);
+        for (int i = 0; i < 20_000; i++) {
+            Segment.Exponential glide = Segment.Exponential.between(
+                    smallRatio(random), smallRatio(random), random.nextLong(1, 10_000_000_000L));
+            long target = random.nextLong(-1_000_000, 20_000_000_000L);
+            long least = glide.leastReaching(target);
+            assertTrue(glide.advance(least) >= target, "does not reach " + target + " in " + glide);
+            assertTrue(glide.advance(least - 1) < target, "not the least for " + target + " in " + glide);
+            assertTrue(Math.abs(glide.closedForm(target) - least) <= 1,
+                    "candidate " + glide.closedForm(target) + " vs " + least + " in " + glide);
+        }
+    }
+
+    @Test
+    @DisplayName("an exponential glide never steps local time backwards")
+    void exponentialIsMonotone() {
+        Random random = new Random(13);
+        for (int i = 0; i < 200; i++) {
+            Segment.Exponential glide = Segment.Exponential.between(
+                    smallRatio(random), smallRatio(random), random.nextLong(1_000, 10_000_000_000L));
+            long x = random.nextLong(-1_000, glide.extent() + 1_000);
+            long previous = glide.advance(x - 1);
+            for (long p = x; p < x + 5_000; p++) {
+                long next = glide.advance(p);
+                assertTrue(next >= previous, glide + " stepped back at " + p);
+                previous = next;
+            }
+        }
     }
 
     // -------------------------------------------------------------- helpers

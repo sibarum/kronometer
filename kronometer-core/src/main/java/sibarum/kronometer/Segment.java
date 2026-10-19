@@ -1,6 +1,8 @@
 package sibarum.kronometer;
 
+import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.MathContext;
 import java.util.Objects;
 
 /**
@@ -22,11 +24,12 @@ import java.util.Objects;
  *       construction.</li>
  * </ul>
  *
- * <p><b>The knot rule.</b> Every segment ends on an exact {@link Ratio}. A glide is inexact in no sense
- * that matters (its integral is exact rational arithmetic), but the speed it settles on is a
- * {@code Ratio}, so the tempo's flattened conversion takes over after it and exact grids line up again.
+ * <p><b>The knot rule.</b> Every segment ends on an exact {@link Ratio}. A linear glide's integral is
+ * exact rational arithmetic; an exponential glide's is not, since it involves a logarithm. Either way, the
+ * speed it settles on is a {@code Ratio}, and the local time it ends at is fixed once as a whole
+ * nanosecond, so after the glide the conversion is exact again and exact grids line up again.
  */
-sealed interface Segment permits Segment.Hold, Segment.Linear {
+sealed interface Segment permits Segment.Hold, Segment.Linear, Segment.Exponential {
 
     /** The exact speed this segment settles on, and the one the flattened conversion uses after it. */
     Ratio endSpeed();
@@ -42,6 +45,12 @@ sealed interface Segment permits Segment.Hold, Segment.Linear {
 
     /** The least parent duration {@code p} with {@code advance(p) >= target}. */
     long leastReaching(long target);
+
+    /**
+     * The speed after {@code parentNanos}, as an exact fraction {@code [num, den]}: where a glide that
+     * replaces this segment starts from, so that speed is continuous across the change.
+     */
+    BigInteger[] speedAt(long parentNanos);
 
     /** A constant speed. */
     record Hold(Ratio speed) implements Segment {
@@ -68,6 +77,11 @@ sealed interface Segment permits Segment.Hold, Segment.Linear {
         @Override
         public long leastReaching(long target) {
             return Tempo.leastReaching(speed, target);
+        }
+
+        @Override
+        public BigInteger[] speedAt(long parentNanos) {
+            return new BigInteger[] {BigInteger.valueOf(speed.num()), BigInteger.valueOf(speed.den())};
         }
 
         @Override
@@ -142,11 +156,8 @@ sealed interface Segment permits Segment.Hold, Segment.Linear {
             return extent;
         }
 
-        /**
-         * The exact speed after {@code parentNanos}, as a fraction {@code [num, den]}: where a glide that
-         * replaces this one starts from, so that speed is continuous across the change.
-         */
-        BigInteger[] speedAt(long parentNanos) {
+        @Override
+        public BigInteger[] speedAt(long parentNanos) {
             if (parentNanos <= 0) {
                 return new BigInteger[] {n0, d0};
             }
@@ -217,6 +228,159 @@ sealed interface Segment permits Segment.Hold, Segment.Linear {
         @Override
         public String toString() {
             return "glide(" + n0 + "/" + d0 + " -> " + to + " over " + new Dur(extent) + ")";
+        }
+    }
+
+    /**
+     * A speed that changes by a constant <em>ratio</em> per unit of parent time, from {@code r0} to
+     * {@code r1} over {@code extent}, and then holds {@code r1}. Tempo and pitch are heard on a log scale,
+     * so this is the glide that sounds even: halfway through a glide from 1 to 4, the speed is 2.
+     *
+     * <pre>
+     *   s(x) = r0 · ρ^(x/D)              ρ = r1 / r0
+     *   I(x) = (r0·D / ln ρ) · (ρ^(x/D) − 1)
+     * </pre>
+     *
+     * <p>The integral is transcendental, so it is computed in {@code double}, with {@link StrictMath}'s
+     * {@code expm1} and {@code log1p} so that it gives the same bits on every platform and under
+     * native-image. Two things keep that from mattering:
+     *
+     * <ul>
+     *   <li><b>It is exact at its end.</b> {@code floor(I(D))} is computed once, and after the extent the
+     *       segment is that whole nanosecond plus an exact {@link Ratio} hold. So nothing inexact outlives
+     *       the glide.</li>
+     *   <li><b>It is monotone.</b> {@code I} is evaluated to about {@code 1e-16} relative, a millionth of a
+     *       nanosecond over hours, while every nanosecond of parent time adds at least the slower of the two
+     *       speeds. So rounding cannot make local time step backwards for any speed this side of a
+     *       millionth.</li>
+     * </ul>
+     *
+     * <p>The inverse is {@code log1p}, checked against {@link #advance} by the same fix-up as the others.
+     */
+    final class Exponential implements Segment {
+
+        private final BigInteger n0;
+        private final BigInteger d0;
+        private final Ratio to;
+        private final long extent;
+
+        private final double r0;
+        private final double logRho;
+        /** {@code r0·D / ln ρ}: the integral's scale. */
+        private final double scale;
+        /** {@code floor(I(extent))}: where the glide ends, and where the hold after it starts from. */
+        private final long atEnd;
+
+        Exponential(BigInteger n0, BigInteger d0, Ratio to, long extent) {
+            if (n0.signum() <= 0 || d0.signum() <= 0) {
+                throw new IllegalArgumentException("a glide must start at a positive speed: " + n0 + "/" + d0);
+            }
+            if (extent <= 0) {
+                throw new IllegalArgumentException("a glide needs a positive extent: " + extent + " ns");
+            }
+            BigInteger g = n0.gcd(d0);
+            this.n0 = n0.divide(g);
+            this.d0 = d0.divide(g);
+            this.to = Objects.requireNonNull(to, "to");
+            this.extent = extent;
+
+            this.r0 = toDouble(this.n0, this.d0);
+            this.logRho = StrictMath.log(to.value() / r0);
+            this.scale = logRho == 0.0 ? 0.0 : r0 * extent / logRho;
+            this.atEnd = integral(extent);
+        }
+
+        /** A glide from the exact speed {@code from} to {@code to}. */
+        static Exponential between(Ratio from, Ratio to, long extent) {
+            return new Exponential(BigInteger.valueOf(from.num()), BigInteger.valueOf(from.den()), to, extent);
+        }
+
+        @Override
+        public Ratio endSpeed() {
+            return to;
+        }
+
+        @Override
+        public long extent() {
+            return extent;
+        }
+
+        /**
+         * Within the glide, the speed is irrational in general, so this is the exact value of the
+         * {@code double} nearest it. The next glide starts there: continuous to a part in {@code 1e16}.
+         */
+        @Override
+        public BigInteger[] speedAt(long parentNanos) {
+            if (parentNanos <= 0) {
+                return new BigInteger[] {n0, d0};
+            }
+            if (parentNanos >= extent) {
+                return new BigInteger[] {BigInteger.valueOf(to.num()), BigInteger.valueOf(to.den())};
+            }
+            double speed = r0 * StrictMath.exp(logRho * ((double) parentNanos / extent));
+            BigDecimal exact = new BigDecimal(speed);
+            BigInteger num = exact.unscaledValue();
+            BigInteger den = BigInteger.TEN.pow(Math.max(exact.scale(), 0));
+            if (exact.scale() < 0) {
+                num = num.multiply(BigInteger.TEN.pow(-exact.scale()));
+            }
+            BigInteger g = num.gcd(den);
+            return new BigInteger[] {num.divide(g), den.divide(g)};
+        }
+
+        @Override
+        public long advance(long parentNanos) {
+            if (parentNanos <= 0) {
+                return (long) Math.floor(r0 * parentNanos);
+            }
+            if (parentNanos <= extent) {
+                return integral(parentNanos);
+            }
+            return Math.addExact(atEnd, Tempo.floorScaled(to, parentNanos - extent));
+        }
+
+        @Override
+        public long leastReaching(long target) {
+            long p = closedForm(target);
+            while (advance(p) < target) {
+                p++;
+            }
+            while (advance(p - 1) >= target) {
+                p--;
+            }
+            return p;
+        }
+
+        /** The candidate for {@link #leastReaching}: {@code I⁻¹(k) = (D / ln ρ) · log1p(k · ln ρ / (r0·D))}. */
+        long closedForm(long target) {
+            if (target <= 0) {
+                return (long) Math.ceil(target / r0);
+            }
+            if (target > atEnd) {
+                return Math.addExact(extent, Tempo.leastReaching(to, target - atEnd));
+            }
+            if (logRho == 0.0) {
+                return (long) Math.ceil(target / r0);
+            }
+            double x = extent / logRho * StrictMath.log1p(target / scale);
+            return Math.min(extent, (long) Math.ceil(x));
+        }
+
+        /** {@code floor(I(x))}. */
+        private long integral(long x) {
+            if (logRho == 0.0) {
+                return (long) Math.floor(r0 * x);
+            }
+            return (long) Math.floor(scale * StrictMath.expm1(logRho * ((double) x / extent)));
+        }
+
+        private static double toDouble(BigInteger num, BigInteger den) {
+            return new BigDecimal(num).divide(new BigDecimal(den), MathContext.DECIMAL64).doubleValue();
+        }
+
+        @Override
+        public String toString() {
+            return "exp-glide(" + n0 + "/" + d0 + " -> " + to + " over " + new Dur(extent) + ")";
         }
     }
 }
