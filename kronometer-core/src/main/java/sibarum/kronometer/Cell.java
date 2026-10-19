@@ -47,7 +47,6 @@ public final class Cell<T> implements Signal<T> {
 
     private Curve<T> curve;
     private Dur curveStartLocal;
-    private Moment curveEnd;
 
     private Signal<T> source;
 
@@ -118,9 +117,6 @@ public final class Cell<T> implements Signal<T> {
         Moment now = kron.now();
         this.curve = curve;
         this.curveStartLocal = tempo.elapsedAt(now);
-        this.curveEnd = curve.isInfinite()
-                ? Moment.FOREVER
-                : tempo.globalAt(curveStartLocal.plus(curve.extent()));
         this.mode = Mode.DRIVEN;
         this.source = null;
         graph.invalidate(now, this);
@@ -162,7 +158,7 @@ public final class Cell<T> implements Signal<T> {
 
     /** Whether this cell's future is currently determined by a curve that has not yet ended. */
     public boolean isDriven() {
-        return mode == Mode.DRIVEN && curveEnd.isAfter(kron.now());
+        return mode == Mode.DRIVEN && curveEnd().isAfter(kron.now());
     }
 
     @Override
@@ -201,7 +197,7 @@ public final class Cell<T> implements Signal<T> {
     public Moment varyingUntil() {
         return switch (mode) {
             case HELD, LIVE -> kron.now();
-            case DRIVEN -> curveEnd;
+            case DRIVEN -> curveEnd();
             case FOLLOWING -> source.varyingUntil();
         };
     }
@@ -212,6 +208,20 @@ public final class Cell<T> implements Signal<T> {
     }
 
     // -------------------------------------------------------------- internals
+
+    /**
+     * Where the driving curve ends, in global time.
+     *
+     * <p>Derived through the tempo on every call rather than stored at {@link #drive}: the curve's end is
+     * fixed in local time, and a {@link Tempo#rescale} moves where that lands on the wall. A stored end
+     * went stale at the rescale, and prediction stored a constant tail from it while the curve was still
+     * moving.
+     */
+    private Moment curveEnd() {
+        return curve.isInfinite()
+                ? Moment.FOREVER
+                : tempo.globalAt(curveStartLocal.plus(curve.extent()));
+    }
 
     private T valueFromCurve(Moment at) {
         Dur elapsed = tempo.elapsedAt(at).minus(curveStartLocal);

@@ -192,4 +192,62 @@ class TempoTest {
             kron.run();
         }
     }
+
+    @Test
+    @DisplayName("a rescale moves the end of a driven curve")
+    void rescaleMovesTheCurveEnd() {
+        try (Kron kron = Kron.virtual()) {
+            Tempo tempo = kron.tempo().child(Ratio.ONE);
+            Cell<Double> value = kron.cell("value", tempo, 0.0);
+
+            kron.spork(() -> {
+                value.drive(Curve.ramp(0.0, 1.0, ms(100)));
+                assertEquals(Moment.ORIGIN.plus(ms(100)), value.varyingUntil());
+                Time.advance(ms(50));
+
+                tempo.rescale(Ratio.HALF);                        // 50 ms of local curve left: 100 ms of wall
+                assertEquals(Moment.ORIGIN.plus(ms(150)), value.varyingUntil());
+                Time.advance(ms(60));
+                assertTrue(value.isDriven(), "the curve is still running at 110 ms");
+            });
+            kron.run();
+        }
+    }
+
+    @Test
+    @DisplayName("a predicted curve keeps moving after a rescale slows it")
+    void predictionFollowsARescale() {
+        List<String> lazy = rescaledRamp(Predict.NEVER);
+        List<String> eager = rescaledRamp(Predict.EAGER);
+
+        assertEquals(lazy, eager);
+        // 40 ms at full speed, then half: local 90 ms at 140, and the end at 160.
+        assertTrue(lazy.contains("140 ms 0.9"), "the reference run reaches 0.9 at 140 ms: " + lazy);
+        assertTrue(lazy.contains("160 ms 1.0"), "and 1.0 at 160 ms: " + lazy);
+    }
+
+    /** A ramp in a tempo halved halfway through, sampled by a root-tempo domain that predicts it. */
+    private static List<String> rescaledRamp(Predict policy) {
+        List<String> observed = new ArrayList<>();
+        try (Kron kron = Kron.virtual()) {
+            Tempo tempo = kron.tempo().child(Ratio.ONE);
+            Cell<Double> value = kron.cell("value", tempo, 0.0);
+            Signal<Double> shown = kron.computed("shown", () -> value.get());
+
+            Rate frames = kron.fixed("frames", ms(10)).lookahead(ms(200));
+            frames.predict(shown, policy);
+
+            kron.spork(() -> {
+                value.drive(Curve.ramp(0.0, 1.0, ms(100)));
+                Time.advance(ms(40));
+                tempo.rescale(Ratio.HALF);
+            });
+            kron.effect(frames, () -> observed.add(
+                    Time.now().since(Moment.ORIGIN).nanos() / 1_000_000 + " ms "
+                            + Math.round(shown.get() * 100) / 100.0));
+
+            kron.runUntil(Moment.ORIGIN.plus(ms(200)));
+        }
+        return observed;
+    }
 }
