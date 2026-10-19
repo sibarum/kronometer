@@ -278,8 +278,8 @@ Where the horizon gets consumed:
    [benchmarks/tempo.md](benchmarks/tempo.md) has the measurement:
    - **Conversions:** under a glide they cost 165 ns (linear) and 19 ns (exponential) at p50, against a gate
      of 2 083 ns.
-   - **Steps:** a 48 kHz step costs 1.75× (linear) and 1.38× (exponential) the constant-tempo step, against a
-     gate of 2×.
+   - **Steps:** a 48 kHz step costs 1.76× (linear) and 1.24× (exponential) the constant-tempo step, against a
+     gate of 2×; 1.84× and 1.09× with the carrier pinned.
    - **The first run failed the step gate.** Three exactness-neutral changes fixed it, and so did a bug in the
      harness: it divided by the wrong step count.
 
@@ -287,8 +287,10 @@ Where the horizon gets consumed:
 
 **M9 is complete.** Every step above is done, and the exit criteria below are met by the tests named in each
 step, with one exception: the gridLine cost under a glide is recorded for the JVM only, not native-image. Left for
-later, as listed below: smoothstep segments, arbitrary `Curve` speeds, `samp` as a base unit, and the unexplained
-~2× step cost of any non-1:1 tempo noted in the benchmark.
+later, as listed below: smoothstep segments, arbitrary `Curve` speeds and `samp` as a base unit. The ~2× step cost
+of any non-1:1 tempo that the benchmark first reported was a second harness bug, not a cost: whichever case ran
+first got the JVM's early fast window, and run round-robin a 1:1, 3:2 and 7:5 step cost the same (see the
+benchmark page).
 
 ## Exit criteria
 

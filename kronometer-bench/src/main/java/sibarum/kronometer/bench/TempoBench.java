@@ -61,17 +61,18 @@ public final class TempoBench {
             }
         }
 
-        System.out.printf("%n2. A 48 kHz fixed domain, one second of steps, ns per step taken (best of five after three)%n");
-        double unity = stepCost(Ratio.ONE, null);
+        System.out.printf("%n2. A 48 kHz fixed domain, one second of steps, ns per step taken"
+                + " (best of %d interleaved rounds after %d)%n", STEP_ROUNDS, STEP_WARMUP_ROUNDS);
+        double[] cost = stepCosts();
+        double unity = cost[0];
+        double constant = cost[1];
         System.out.printf("  %-28s %10.0f   (reference: 1:1 skips the ratio arithmetic entirely)%n",
                 "constant 1:1", unity);
-        double constant = stepCost(Ratio.of(3, 2), null);
         System.out.printf("  %-28s %10.0f   (the gate's baseline: the affine path)%n", label(null), constant);
         double worstStep = 0;
-        for (Glide shape : new Glide[] {Glide.LINEAR, Glide.EXPONENTIAL}) {
-            double cost = stepCost(Ratio.ONE, shape);
-            worstStep = Math.max(worstStep, cost);
-            System.out.printf("  %-28s %10.0f   %.2fx%n", label(shape), cost, cost / constant);
+        for (int i = 2; i < STEP_CASES.length; i++) {
+            worstStep = Math.max(worstStep, cost[i]);
+            System.out.printf("  %-28s %10.0f   %.2fx%n", label(STEP_CASES[i].shape()), cost[i], cost[i] / constant);
         }
 
         boolean conversionOk = worst < GATE_CONVERSION_NANOS;
@@ -98,13 +99,41 @@ public final class TempoBench {
         return tempo;
     }
 
-    private static double stepCost(Ratio start, Glide shape) {
-        for (int warm = 0; warm < 3; warm++) {
-            runSteps(start, shape);
-        }
-        double best = Double.MAX_VALUE;
-        for (int i = 0; i < 5; i++) {
-            best = Math.min(best, runSteps(start, shape));
+    /** One step case: a tempo starting at {@code start}, gliding to 3:2 if {@code shape} is given. */
+    private record StepCase(Ratio start, Glide shape) {
+    }
+
+    private static final StepCase[] STEP_CASES = {
+            new StepCase(Ratio.ONE, null),
+            new StepCase(Ratio.of(3, 2), null),
+            new StepCase(Ratio.ONE, Glide.LINEAR),
+            new StepCase(Ratio.ONE, Glide.EXPONENTIAL),
+    };
+    private static final int STEP_WARMUP_ROUNDS = 3;
+    private static final int STEP_ROUNDS = 5;
+
+    /**
+     * The best per-step cost of every case in {@link #STEP_CASES}, measured round-robin: each round runs every
+     * case once, starting one case later than the round before.
+     *
+     * <p>The first version measured each case to completion before starting the next, and the first case
+     * always came out about twice as cheap as the rest. Not because it was cheaper: on GraalVM's JIT, with the
+     * default virtual-thread scheduler, the first several wall seconds of baton handoffs run at about 500 ns
+     * and then settle at about 1 200 ns, for any tempo. Whichever case ran first got the fast window to
+     * itself. Run 1:1 three times in a row and it costs 537, 1 394, then 1 455 ns. Interleaving puts every
+     * case on both sides of the change, so they are compared under the same conditions.
+     */
+    private static double[] stepCosts() {
+        double[] best = new double[STEP_CASES.length];
+        java.util.Arrays.fill(best, Double.MAX_VALUE);
+        for (int round = 0; round < STEP_WARMUP_ROUNDS + STEP_ROUNDS; round++) {
+            for (int k = 0; k < STEP_CASES.length; k++) {
+                int i = (k + round) % STEP_CASES.length;
+                double cost = runSteps(STEP_CASES[i].start(), STEP_CASES[i].shape());
+                if (round >= STEP_WARMUP_ROUNDS) {
+                    best[i] = Math.min(best[i], cost);
+                }
+            }
         }
         return best;
     }
