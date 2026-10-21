@@ -3,6 +3,8 @@
 **A strongly-timed event and animation controller for the JVM and GraalVM native-image — ChucK's
 clock, Vue's graph.**
 
+Part of the [VexelRay](https://sibarum.github.io/) stack. Building an application on it? Start at the [developer guide](https://sibarum.github.io/vexelray-framework/developers/).
+
 Time is a value you *advance*, not a callback you wait for. A `Shred` is ordinary Java that survives
 across time — it runs, says "let 250 milliseconds pass", and picks up where it left off with its
 stack intact. Between two such statements it executes in **zero logical time**, so timing is exact
