@@ -118,4 +118,20 @@
         </plugins>
     </build>
 
+    <profiles>
+        <!-- On Linux the build goes to target-linux/, not target/: the Windows host and a Linux VM build the same checkout
+             (a shared folder), and each keeps its own output beside the other's instead of overwriting it. -->
+        <profile>
+            <id>linux-build-output</id>
+            <activation>
+                <os>
+                    <family>unix</family>
+                    <name>linux</name>
+                </os>
+            </activation>
+            <build>
+                <directory>${project.basedir}/target-linux</directory>
+            </build>
+        </profile>
+    </profiles>
 </project>
