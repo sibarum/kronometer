@@ -7,7 +7,7 @@
     <parent>
         <groupId>sibarum.kronometer</groupId>
         <artifactId>kronometer</artifactId>
-        <version>1.2-SNAPSHOT</version>
+        <version>1.3-SNAPSHOT</version>
     </parent>
 
     <artifactId>kronometer-atchung</artifactId>
@@ -25,7 +25,7 @@
         <dependency>
             <groupId>sibarum.atchung</groupId>
             <artifactId>atchung-core</artifactId>
-            <version>1.2-SNAPSHOT</version>
+            <version>1.3-SNAPSHOT</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
