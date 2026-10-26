@@ -203,7 +203,7 @@ So the guarantee must not depend on the list being complete:
 
 ```java
 app.idleRefresh(200_000_000L)    // 5 Hz floor while focused: nothing waits longer than this
-   .maxFrameRateToDisplay(16_666_666L);   // ceiling = the display's refresh, read from the window; 60 Hz if it cannot say
+   .maxFrameRateToDisplay(16_666_666L);   // ceiling = the display's refresh, read from the window, but never above 60 Hz
 ```
 
 `maxFrameRate(nanos)` is still there for a ceiling below the display's rate (a power saver). Whichever is used, the loop
