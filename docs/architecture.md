@@ -63,8 +63,11 @@ A shred must suspend mid-function and resume later with its stack intact. JDK 25
 shred **is** a virtual thread, and `advance()` is a park. Ten thousand concurrent animations is ten
 thousand parked virtual threads — a few megabytes, not ten thousand OS threads.
 
-`ScopedValue` (finalized in JDK 25) carries the current shred, so the time intrinsics are plain
-statics with no argument threading:
+A thread-local on the shred's own virtual thread carries the current shred, so the time intrinsics
+are plain statics with no argument threading. (It was a `ScopedValue` until the Graal JIT on Oracle
+GraalVM 25.0.3 was caught giving a virtual thread another virtual thread's binding, one that had last
+run on the same carrier: a shred then suspended the wrong shred, steps landed out of order, and the
+timeline could hang. See `Kron.CURRENT`.)
 
 ```java
 import static sibarum.kronometer.Time.*;
@@ -804,7 +807,7 @@ kronometer-anim  ──  easing and interpolation libraries. depends only on cor
 ## 14. Native-image
 
 Plain Java: no reflection, no proxies, no service loading, no runtime scanning. Virtual threads and
-`ScopedValue` are supported by GraalVM native-image, and dependency tracking is by read-registration
+thread-locals are supported by GraalVM native-image, and dependency tracking is by read-registration
 rather than annotation scanning, so the graph needs no metadata either. As elsewhere, the `native`
 profile is opt-in so ordinary builds stay fast.
 

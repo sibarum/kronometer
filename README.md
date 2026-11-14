@@ -333,8 +333,8 @@ constructs the `Kron`, ticks it per frame, and exposes it.
 
 ## Requirements
 
-- **JDK 25+** (enforced by `maven-enforcer-plugin`) — virtual threads carry shreds, `ScopedValue`
-  carries the current one. A **GraalVM** JDK only for native builds.
+- **JDK 25+** (enforced by `maven-enforcer-plugin`) — virtual threads carry shreds, and a thread-local
+  on each one says which shred it is. A **GraalVM** JDK only for native builds.
 - **Maven 3.9+**.
 - **One runtime dependency**: `atchung-probe` `1.0-SNAPSHOT`, which is a leaf. Until it is published,
   build [atchung](../atchung) first so the artifact is in your local repo.

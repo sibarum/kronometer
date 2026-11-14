@@ -123,7 +123,7 @@ public final class Shred {
      * yield point.
      */
     public void join() throws InterruptedException {
-        if (Kron.CURRENT.isBound()) {
+        if (Kron.current() != null) {
             throw new Failures.NotOnTimeline(
                     "join() would hold the baton and stop logical time; use await(shred.done())");
         }
@@ -184,7 +184,7 @@ public final class Shred {
         state = State.RUNNING;
         try {
             checkCancelled();
-            ScopedValue.where(Kron.CURRENT, this).run(body);
+            Kron.runAs(this, body);
         } catch (Failures.ShredCancelled e) {
             // Expected: cancellation unwound the shred and its finally blocks have run.
         } catch (Throwable t) {

@@ -71,8 +71,8 @@ class PrecomputeTest {
             List<String> eager = scenario(Predict.EAGER, seed);
             List<String> oneStep = scenario(Predict.LAZY, seed);
 
-            assertEquals(lazy, eager, "EAGER diverged from the reference at seed " + seed);
-            assertEquals(lazy, oneStep, "LAZY diverged from the reference at seed " + seed);
+            Divergence.assertSameEvents("seed " + seed, "NEVER", lazy, "EAGER", eager);
+            Divergence.assertSameEvents("seed " + seed, "NEVER", lazy, "LAZY", oneStep);
             assertFalse(lazy.isEmpty(), "the scenario should produce output");
         }
     }

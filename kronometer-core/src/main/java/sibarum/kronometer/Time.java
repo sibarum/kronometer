@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * The time intrinsics: what a shred says to make logical time pass.
  *
- * <p>Static on purpose. The current shred is carried by a {@code ScopedValue}, so these read as bare
+ * <p>Static on purpose. The current shred is carried by its own thread, so these read as bare
  * verbs once statically imported, which is as close to ChucK's {@code 250::ms => now} as Java gets:
  *
  * <pre>{@code
@@ -26,11 +26,12 @@ public final class Time {
 
     /** The shred running this code. */
     public static Shred self() {
-        if (!Kron.CURRENT.isBound()) {
+        Shred self = Kron.current();
+        if (self == null) {
             throw new Failures.NotOnTimeline(
                     "no current shred: the time intrinsics only work inside a shred");
         }
-        return Kron.CURRENT.get();
+        return self;
     }
 
     /** The runtime this shred belongs to. */

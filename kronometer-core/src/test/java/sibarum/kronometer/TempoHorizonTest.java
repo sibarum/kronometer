@@ -179,8 +179,8 @@ class TempoHorizonTest {
     @DisplayName("prediction on and off agree with a followed tempo and a live one rescaled per event")
     void predictionIsInvisibleWithVolatileTempos() {
         for (long seed = 0; seed < 50; seed++) {
-            assertEquals(volatileScenario(Predict.NEVER, seed), volatileScenario(Predict.EAGER, seed),
-                    "seed " + seed);
+            Divergence.assertSameEvents("seed " + seed, "NEVER", volatileScenario(Predict.NEVER, seed),
+                    "EAGER", volatileScenario(Predict.EAGER, seed));
         }
         assertFalse(volatileScenario(Predict.NEVER, 0).isEmpty());
     }

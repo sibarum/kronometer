@@ -68,9 +68,10 @@ class DeterminismTest {
     @Test
     @DisplayName("1000 runs of the same scenario produce byte-identical traces")
     void identicalTracesAcrossManyRuns() {
-        String reference = runScenario();
+        List<String> reference = runScenario().lines().toList();
         for (int run = 1; run < 1_000; run++) {
-            assertEquals(reference, runScenario(), "run " + run + " diverged from run 0");
+            Divergence.assertSameEvents("run " + run, "run 0", reference,
+                    "run " + run, runScenario().lines().toList());
         }
     }
 

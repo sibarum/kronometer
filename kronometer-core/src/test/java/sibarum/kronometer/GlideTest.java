@@ -157,7 +157,8 @@ class GlideTest {
     @DisplayName("prediction on and off agree through glides, for a domain outside the tempo and one inside it")
     void predictionIsInvisibleThroughGlides() {
         for (long seed = 0; seed < 50; seed++) {
-            assertEquals(gliding(Predict.NEVER, seed), gliding(Predict.EAGER, seed), "seed " + seed);
+            Divergence.assertSameEvents("seed " + seed,
+                    "NEVER", gliding(Predict.NEVER, seed), "EAGER", gliding(Predict.EAGER, seed));
         }
         assertFalse(gliding(Predict.NEVER, 0).isEmpty());
     }

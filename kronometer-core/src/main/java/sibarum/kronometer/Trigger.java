@@ -53,8 +53,8 @@ public final class Trigger {
     /**
      * Broadcast without the on-timeline check, for the kernel itself.
      *
-     * <p>A shred ending fires its {@code done()} trigger from its own thread after the scoped binding
-     * has already unwound, so {@code CURRENT} is no longer bound — even though the kernel is blocked
+     * <p>A shred ending fires its {@code done()} trigger from its own thread after its binding
+     * has already unwound, so {@link Kron#current()} is null — even though the kernel is blocked
      * on the baton and mutual exclusion still holds.
      */
     void wakeAll() {

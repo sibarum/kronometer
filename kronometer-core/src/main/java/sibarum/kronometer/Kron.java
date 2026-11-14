@@ -47,7 +47,34 @@ import sibarum.probe.Zone;
  */
 public final class Kron implements AutoCloseable {
 
-    static final ScopedValue<Shred> CURRENT = ScopedValue.newInstance();
+    /**
+     * The shred running on this thread, or {@code null} off the timeline. Set by {@link Shred} on its own
+     * virtual thread around its body, and nowhere else.
+     *
+     * <p>A {@code ThreadLocal}, not the {@code ScopedValue} it used to be, and that matters. Under the
+     * Graal JIT on Oracle GraalVM 25.0.3, {@code ScopedValue.get()} on a virtual thread was measured
+     * returning <em>another</em> virtual thread's binding: one that had last run on the same carrier,
+     * thousands of times in ten thousand runs of {@code GlideTest}'s prediction comparison, never under
+     * C2. A shred that resolves to the wrong shred suspends the wrong one: steps landed out of order,
+     * and now and then the baton went to a shred that was not waiting for it and the timeline hung. A
+     * thread-local is read from the virtual thread itself, and it was right every time.
+     */
+    private static final ThreadLocal<Shred> CURRENT = new ThreadLocal<>();
+
+    /** The shred running on this thread, or {@code null} if this thread is not on the timeline. */
+    static Shred current() {
+        return CURRENT.get();
+    }
+
+    /** Run {@code body} as {@code shred}, on that shred's own thread. */
+    static void runAs(Shred shred, Runnable body) {
+        CURRENT.set(shred);
+        try {
+            body.run();
+        } finally {
+            CURRENT.remove();
+        }
+    }
 
     private static final long UNBOUNDED = Long.MIN_VALUE;
 
@@ -194,7 +221,7 @@ public final class Kron implements AutoCloseable {
      * flow, would be worse than answering the question.
      */
     public boolean isOnTimeline() {
-        return CURRENT.isBound();
+        return current() != null;
     }
 
     /**
@@ -219,7 +246,7 @@ public final class Kron implements AutoCloseable {
      */
     public void onTimeline(Runnable work) {
         Objects.requireNonNull(work, "work");
-        if (CURRENT.isBound()) {
+        if (current() != null) {
             work.run();
         } else if (mayActInline()) {
             // Setup, or the host's own loop thread between ticks: nothing is contending, so place it
@@ -702,7 +729,7 @@ public final class Kron implements AutoCloseable {
         Effect effect = new Effect(this, name, Objects.requireNonNull(body, "body"), true);
         graph.registerReactive(effect);
         graph.registerEffect(effect);
-        if (CURRENT.isBound()) {
+        if (current() != null) {
             effect.run();
         } else {
             post(now, effect::run);
@@ -1253,7 +1280,7 @@ public final class Kron implements AutoCloseable {
     }
 
     private Shred sporkAt(Moment at, Detach detach, String name, int priority, Runnable body) {
-        Shred parent = CURRENT.isBound() ? CURRENT.get() : null;
+        Shred parent = current();
         Shred shred = new Shred(
                 this, nextShredId++, name, body, parent, detach == Detach.YES, priority);
         if (parent != null) {
@@ -1396,7 +1423,7 @@ public final class Kron implements AutoCloseable {
      * production.
      */
     private boolean mayActInline() {
-        if (CURRENT.isBound() || !started) {
+        if (current() != null || !started) {
             return true;
         }
         return !running && Thread.currentThread() == hostThread && !isHandoff();
