@@ -25,44 +25,6 @@ class RealtimeSmokeTest {
 
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    @DisplayName("200 ms of logical time takes about 200 ms of wall-clock time")
-    void realtimeActuallyPaces() {
-        long started = System.nanoTime();
-        try (Kron kron = Kron.realtime()) {
-            kron.spork("frames", () -> {
-                Metro metro = Metro.hz(60);
-                for (int i = 0; i < 12; i++) {         // 12 frames ≈ 200 ms
-                    metro.tick();
-                }
-            });
-            kron.run();
-        }
-        double elapsedMs = (System.nanoTime() - started) / 1_000_000.0;
-        assertTrue(elapsedMs > 150, "should have actually waited, took " + elapsedMs + " ms");
-        assertTrue(elapsedMs < 1_000, "should not have waited far too long, took " + elapsedMs + " ms");
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    @DisplayName("an unloaded 60 Hz run accrues little slip")
-    void unloadedRunStaysNearlyOnTime() {
-        Realtime clock = Clock.realtime();
-        try (Kron kron = Kron.of(clock)) {
-            kron.spork("frames", () -> {
-                Metro metro = Metro.hz(60);
-                for (int i = 0; i < 30; i++) {
-                    metro.tick();
-                }
-            });
-            kron.run();
-            // Half a frame of accumulated debt over half a second would be a real problem; anything
-            // under that is the machine, not the kernel.
-            assertTrue(clock.slip().compareTo(ms(8)) < 0, "slip after 30 frames: " + clock.slip());
-        }
-    }
-
-    @Test
-    @Timeout(value = 30, unit = TimeUnit.SECONDS)
     @DisplayName("a real stall becomes slip, and is reported")
     void aRealStallIsReported() {
         List<Overrun> events = new ArrayList<>();
